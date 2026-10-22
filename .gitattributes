@@ -1,0 +1,4 @@
+# The formatter writes LF and the formatter checks for LF, so the working
+# tree has to be LF as well. Without this, git checks the files out with
+# CRLF on Windows and `biome check` fails on every line of them.
+* text=auto eol=lf

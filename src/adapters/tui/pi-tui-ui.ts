@@ -18,6 +18,7 @@ const dim = (text: string): string => `\u001b[2m${text}\u001b[0m`;
 const bold = (text: string): string => `\u001b[1m${text}\u001b[0m`;
 const red = (text: string): string => `\u001b[31m${text}\u001b[0m`;
 const green = (text: string): string => `\u001b[32m${text}\u001b[0m`;
+const yellow = (text: string): string => `\u001b[33m${text}\u001b[0m`;
 const cyan = (text: string): string => `\u001b[36m${text}\u001b[0m`;
 
 const selectListTheme: SelectListTheme = {
@@ -63,14 +64,27 @@ export interface PiTuiOptions {
  * plain main screen has no layout engine, and a scroll view inside it would
  * silently render nothing.
  */
+/**
+ * A block of code the agent wrote.
+ *
+ * The code is folded away: what the human sees is the step - its name and
+ * what it was for - because that is what the transcript is for. The code is
+ * one keystroke away for the times when the human wants to see it.
+ */
+interface CodeBlock {
+  readonly header: Text;
+  readonly body: Text;
+  label: string;
+  expanded: boolean;
+}
+
 export class PiTuiUi implements UiPort {
   readonly #tui: TuiAltScreen;
   readonly #document: Container;
   readonly #editor: Editor;
   readonly #status: Text;
   readonly #options: PiTuiOptions;
-  #streaming: Text | undefined;
-  #streamingText = '';
+  #block: CodeBlock | undefined;
   #inputHandler: ((text: string) => void) | undefined;
   #done: (() => void) | undefined;
   #stopped = false;
@@ -131,6 +145,15 @@ export class PiTuiUi implements UiPort {
       this.#handleInterrupt();
       return { consume: true };
     });
+
+    // ctrl+e folds the code of the last step open and shut again.
+    this.#tui.addInputListener((data) => {
+      if (!matchesKey(data, 'ctrl+e')) {
+        return undefined;
+      }
+      this.#toggleLatestCode();
+      return { consume: true };
+    });
   }
 
   emit(event: UiEvent): void {
@@ -138,12 +161,14 @@ export class PiTuiUi implements UiPort {
       this.#appendStreaming(event.text);
     } else if (event.type === 'agent-code') {
       this.#completeStreaming(event.text);
+    } else if (event.type === 'step') {
+      this.#labelStep(event.name, event.description);
     } else if (event.type === 'busy') {
       if (event.busy) {
         // A new turn starts. The code block belongs to a turn, so the next
-        // turn gets its own - otherwise its code would overwrite the block of
-        // the previous turn and appear above it instead of below.
-        this.#releaseStreamingBlock();
+        // turn gets its own - and a step that arrives late must not label
+        // the block of the turn that follows it.
+        this.#block = undefined;
       }
       this.#setBusy(event.busy);
     } else {
@@ -159,6 +184,16 @@ export class PiTuiUi implements UiPort {
   /** How far the transcript is scrolled away from its end. 0 means "at the end". */
   get transcriptScrollTop(): number {
     return this.#tui.viewportTop;
+  }
+
+  /**
+   * The transcript as it stands, in the order it happened.
+   *
+   * The terminal shows a window on it and the window moves; this is the
+   * whole thing, which is what the order of the transcript is about.
+   */
+  get transcriptText(): string {
+    return this.#document.render(this.#tui.terminal.columns).join('\n');
   }
 
   /** True when the transcript is pinned to the newest output. */
@@ -237,6 +272,9 @@ export class PiTuiUi implements UiPort {
       case 'repl-error':
         this.#document.addChild(new Text(`${red('  error')} ${event.text}`));
         return;
+      case 'repl-mismatch':
+        this.#document.addChild(new Text(`${yellow('  ≠    ')} ${event.text}`));
+        return;
       case 'final':
         this.#document.addChild(new Text(`\n${bold('answer')} ${event.text}`));
         return;
@@ -247,40 +285,96 @@ export class PiTuiUi implements UiPort {
     }
   }
 
-  #appendStreaming(delta: string): void {
-    this.#streamingText += delta;
-    // The streaming code is not formatted: it is not valid JavaScript yet,
-    // and formatting on every token would be quadratic.
-    this.#ensureStreaming().setText(this.#renderCode(this.#streamingText, false));
+  #appendStreaming(_delta: string): void {
+    // The code is folded away, so there is nothing to show while it is
+    // being written: the step it turns out to be says more than the code.
   }
 
   #completeStreaming(code: string): void {
-    this.#streamingText = code;
-    this.#ensureStreaming().setText(this.#renderCode(code, true));
-    this.#releaseStreamingBlock();
+    const header = new Text('');
+    const body = new Text(this.#renderCodeBody(this.#format(code)));
+    const block: CodeBlock = {
+      header,
+      body,
+      label: 'js',
+      expanded: false,
+    };
+
+    this.#document.addChild(header);
+    this.#block = block;
+    header.setText(this.#blockLabel(block));
   }
 
-  #releaseStreamingBlock(): void {
-    this.#streaming = undefined;
-    this.#streamingText = '';
-  }
-
-  #ensureStreaming(): Text {
-    if (this.#streaming === undefined) {
-      this.#streaming = new Text('');
-      this.#document.addChild(this.#streaming);
+  /**
+   * Show the code of the block, or hide it again.
+   */
+  #toggleCode(block: CodeBlock): void {
+    block.expanded = !block.expanded;
+    if (block.expanded) {
+      this.#insertAfter(block.header, block.body);
+    } else {
+      this.#document.removeChild(block.body);
     }
-    this.#streaming.invalidate();
-    return this.#streaming;
+    block.header.setText(this.#blockLabel(block));
+    this.#tui.requestRender();
   }
 
-  #renderCode(code: string, formatted: boolean): string {
-    const source = formatted ? this.#format(code) : code;
-    const body = source
+  /**
+   * Put the code right below the step it belongs to.
+   *
+   * The step's place in the transcript was taken when it was written, so
+   * the code belongs there - between the step and whatever the agent said
+   * after it - and not at the end of the document.
+   */
+  #insertAfter(anchor: Text, component: Text): void {
+    const index = this.#document.children.indexOf(anchor);
+    if (index === -1) {
+      this.#document.addChild(component);
+      return;
+    }
+    this.#document.children.splice(index + 1, 0, component);
+  }
+
+  /**
+   * Show or hide the code of the step that ran last.
+   *
+   * The transcript keeps the code folded away, and the step is what the
+   * human reads. When the code itself is what is wanted, this is the way
+   * to get at it.
+   */
+  #toggleLatestCode(): void {
+    const block = this.#block;
+    if (block === undefined) {
+      return;
+    }
+    this.#toggleCode(block);
+  }
+
+  #blockLabel(block: CodeBlock): string {
+    const marker = block.expanded ? cyan('▼') : dim('▶');
+    return `${marker} ${block.label}`;
+  }
+
+  /**
+   * Put the step's name and description on the code block.
+   *
+   * The block was created when the code arrived; the step comes after it,
+   * because the agent only says what the step was once it has written it.
+   */
+  #labelStep(name: string, description: string): void {
+    const block = this.#block;
+    if (block === undefined) {
+      return;
+    }
+    block.label = `${name} - ${description}`;
+    block.header.setText(this.#blockLabel(block));
+  }
+
+  #renderCodeBody(source: string): string {
+    return source
       .split('\n')
       .map((line) => `${dim('│')} ${line}`)
       .join('\n');
-    return `\n${dim('js')}\n${body}`;
   }
 
   #format(code: string): string {
@@ -325,6 +419,9 @@ export class PiTuiUi implements UiPort {
     }
     if (this.#statusText !== undefined && this.#statusText.length > 0) {
       parts.push(dim(this.#statusText));
+    }
+    if (this.#block !== undefined && !this.#block.expanded) {
+      parts.push(dim('ctrl+e shows the code'));
     }
     this.#status.setText(parts.join('   '));
   }

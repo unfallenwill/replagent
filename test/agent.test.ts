@@ -42,15 +42,7 @@ class ScriptedRepl implements ReplPort {
   async exec(code: string): Promise<ReplObservation> {
     this.executed.push(code);
     const next = this.#observations[this.executed.length - 1];
-    return (
-      next ?? {
-        ok: true,
-        logs: [],
-        value: undefined,
-        error: undefined,
-        finalAnswer: undefined,
-      }
-    );
+    return next ?? noopObservation;
   }
 }
 
@@ -91,6 +83,8 @@ const noopObservation: ReplObservation = {
   value: undefined,
   error: undefined,
   finalAnswer: undefined,
+  mismatch: undefined,
+  step: undefined,
 };
 
 describe('runAgentTurn', () => {
@@ -139,6 +133,28 @@ describe('runAgentTurn', () => {
     expect(result.finished).toBe(true);
     expect(result.steps).toBe(1);
     expect(ui.events).toContainEqual({ type: 'final', text: 'the answer' });
+  });
+
+  it('shows the agent that its prediction was wrong', async () => {
+    const llm = new ScriptedLlm(['const a = 1;']);
+    const repl = new ScriptedRepl([
+      { ...noopObservation, value: '1', mismatch: 'MISMATCH: expected 2, got 1' },
+    ]);
+    const ui = new RecordingUi();
+    const conversation = new Conversation();
+
+    await runAgentTurn(
+      deps(llm, repl, ui),
+      conversation,
+      'what is one?',
+      new AbortController().signal,
+    );
+
+    expect(ui.events).toContainEqual({
+      type: 'repl-mismatch',
+      text: 'MISMATCH: expected 2, got 1',
+    });
+    expect(conversation.messages[2]?.text).toContain('MISMATCH: expected 2, got 1');
   });
 
   it('gives up after the step limit', async () => {

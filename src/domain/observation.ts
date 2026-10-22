@@ -28,6 +28,9 @@ export function formatObservation(observation: ReplObservation): string {
   if (observation.value !== undefined) {
     parts.push(`=> ${observation.value}`);
   }
+  if (observation.mismatch !== undefined) {
+    parts.push(observation.mismatch);
+  }
   if (observation.error !== undefined) {
     parts.push(`ERROR: ${observation.error}`);
   }

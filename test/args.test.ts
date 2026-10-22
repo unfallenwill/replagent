@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_MODEL, parseArgs } from '../src/cli/args.js';
+import { DEFAULT_MODEL, DEFAULT_WORLD_PATH, parseArgs } from '../src/cli/args.js';
 
 describe('parseArgs', () => {
   it('uses the defaults', () => {
@@ -8,6 +8,13 @@ describe('parseArgs', () => {
     expect(options.baseUrl).toBeUndefined();
     expect(options.maxTokens).toBe(8192);
     expect(options.maxSteps).toBe(24);
+    expect(options.world).toBe(DEFAULT_WORLD_PATH);
+  });
+
+  it('reads where to keep the world model', () => {
+    const options = parseArgs(['--world', 'notes/model.json'], {});
+
+    expect(options.world).toBe('notes/model.json');
   });
 
   it('reads the model and base url from the environment', () => {

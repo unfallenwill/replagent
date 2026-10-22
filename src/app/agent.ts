@@ -75,6 +75,8 @@ export async function runAgentTurn(
           value: undefined,
           error: prepared.problem,
           finalAnswer: undefined,
+          mismatch: undefined,
+          step: undefined,
         }),
       );
       if (rejections >= MAX_TRANSPORT_REJECTIONS) {
@@ -177,11 +179,21 @@ function withTeachingNote(invalidSyntax: boolean, observation: ReplObservation):
 }
 
 function emitObservation(ui: UiPort, observation: ReplObservation): void {
+  if (observation.step !== undefined) {
+    ui.emit({
+      type: 'step',
+      name: observation.step.name,
+      description: observation.step.description,
+    });
+  }
   for (const log of observation.logs) {
     ui.emit({ type: 'repl-log', text: log });
   }
   if (observation.value !== undefined) {
     ui.emit({ type: 'repl-value', text: observation.value });
+  }
+  if (observation.mismatch !== undefined) {
+    ui.emit({ type: 'repl-mismatch', text: observation.mismatch });
   }
   if (observation.error !== undefined) {
     ui.emit({ type: 'repl-error', text: observation.error });

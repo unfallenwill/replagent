@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { NodeReplSession } from '../src/adapters/repl/node-repl.js';
+import { MemoryWorld } from '../src/adapters/world/memory-world.js';
 
 const sessions: NodeReplSession[] = [];
 
 function session(): NodeReplSession {
-  const created = new NodeReplSession({ cwd: process.cwd() });
+  const created = new NodeReplSession({ cwd: process.cwd(), world: new MemoryWorld() });
   sessions.push(created);
   return created;
 }
@@ -115,5 +116,140 @@ describe('NodeReplSession', () => {
 
     expect(observation.value).toBe("'done'");
     expect(observation.finalAnswer).toBeUndefined();
+  });
+
+  it('says nothing when the result is what was expected', async () => {
+    const repl = session();
+    const observation = await repl.exec('expect(2 + 2);\n2 + 2');
+
+    expect(observation.value).toBe('4');
+    expect(observation.mismatch).toBeUndefined();
+  });
+
+  it('reports a result that was not what was expected', async () => {
+    const repl = session();
+    const observation = await repl.exec('expect(3, "the answer");\n2 + 2');
+
+    expect(observation.mismatch).toBe('MISMATCH: expected 3 (the answer), got 4');
+  });
+
+  it('reports a failed run against the expectation', async () => {
+    const repl = session();
+    const observation = await repl.exec('expect(1);\nthrow new Error("boom")');
+
+    expect(observation.mismatch).toBe('MISMATCH: expected 1, the run failed');
+  });
+
+  it('checks an expectation that was made in an earlier step', async () => {
+    const repl = session();
+    await repl.exec('expect(8)');
+
+    const observation = await repl.exec('3 + 4');
+
+    expect(observation.mismatch).toBe('MISMATCH: expected 8, got 7');
+  });
+
+  it('checks a prediction against the value, not against the log', async () => {
+    const repl = session();
+    const observation = await repl.exec('expect("hello");\nconsole.log("hello");\n"goodbye"');
+
+    expect(observation.mismatch).toBe("MISMATCH: expected 'hello', got 'goodbye'");
+  });
+
+  it('keeps the prediction until a run produces a value', async () => {
+    const repl = session();
+    const first = await repl.exec('expect(7)');
+
+    expect(first.mismatch).toBeUndefined();
+
+    const second = await repl.exec('3 + 4');
+
+    expect(second.mismatch).toBeUndefined();
+  });
+
+  it('keeps a model of the world', async () => {
+    const repl = session();
+    await repl.exec('world.observe("module count", 4, "readdir src")');
+    await repl.exec('world.believe("the build is broken", true, 0.6, "the tests failed")');
+    await repl.exec('await step("check the build", "read the server log", async () => 1)');
+
+    const observation = await repl.exec('console.log(world.report())');
+    const report = observation.logs.join('\n');
+
+    expect(report).toContain('module count = 4 (readdir src,');
+    expect(report).toContain('the build is broken = true, confidence 0.6');
+    expect(report).toContain('plan: check the build - read the server log');
+  });
+
+  it('keeps observations and conclusions apart in the model', async () => {
+    const repl = session();
+    await repl.exec('world.observe("module count", 4, "readdir src")');
+    await repl.exec('world.believe("the build is broken", true, 0.6, "the tests failed")');
+
+    const observation = await repl.exec('world.state()');
+
+    expect(observation.value).toContain('module count');
+    expect(observation.value).toContain('the build is broken');
+  });
+
+  it('runs a step and hands the body its name and description', async () => {
+    const repl = session();
+    const observation = await repl.exec(
+      'await step("count the modules", "read src", async (name, description) => `${name}: ${description}`)',
+    );
+
+    expect(observation.value).toBe("'count the modules: read src'");
+    expect(observation.step).toEqual({ name: 'count the modules', description: 'read src' });
+  });
+
+  it('keeps the step in the world model before the body runs', async () => {
+    const repl = session();
+    await repl.exec('await step("look around", "see what is here", async () => 1)');
+
+    const observation = await repl.exec('world.state()');
+
+    expect(observation.value).toContain('look around');
+    expect(observation.value).toContain('see what is here');
+  });
+
+  it('refuses a step without a name', async () => {
+    const repl = session();
+    const observation = await repl.exec('await step("", "read src", async () => 1)');
+
+    expect(observation.error).toContain('A step needs a name');
+  });
+
+  it('refuses a step without a description', async () => {
+    const repl = session();
+    const observation = await repl.exec('await step("count", "", async () => 1)');
+
+    expect(observation.error).toContain('A step needs a description');
+  });
+
+  it('refuses a step without a program', async () => {
+    const repl = session();
+    const observation = await repl.exec('await step("count", "read src", 42)');
+
+    expect(observation.error).toContain('A step needs a program');
+  });
+
+  it('waits for the promise a step hands back', async () => {
+    const repl = session();
+    const observation = await repl.exec(
+      'await step("wait", "resolve later", async () => { await new Promise((r) => setTimeout(r, 10)); return "late"; })',
+    );
+
+    expect(observation.value).toBe("'late'");
+  });
+
+  it('gives every step a clean scope', async () => {
+    const repl = session();
+    await repl.exec(
+      'await step("first", "declare a name", async () => { const scoped = 1; return scoped; })',
+    );
+
+    const observation = await repl.exec('scoped');
+
+    expect(observation.error).toContain('scoped is not defined');
   });
 });

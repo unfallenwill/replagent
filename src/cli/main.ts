@@ -4,6 +4,7 @@ import { AnthropicLlm } from '../adapters/anthropic/anthropic-llm.js';
 import { JsBeautifyFormatter } from '../adapters/format/js-beautify.js';
 import { NodeReplSession } from '../adapters/repl/node-repl.js';
 import { PiTuiUi } from '../adapters/tui/pi-tui-ui.js';
+import { FileWorld } from '../adapters/world/file-world.js';
 import { runAgentTurn } from '../app/agent.js';
 import { SYSTEM_PROMPT } from '../app/prompt.js';
 import { Conversation } from '../domain/conversation.js';
@@ -48,7 +49,7 @@ async function main(): Promise<void> {
     client,
     model: options.model,
   });
-  const repl = new NodeReplSession();
+  const repl = new NodeReplSession({ world: new FileWorld(options.world) });
   const conversation = new Conversation();
 
   const queue = new TurnQueue(

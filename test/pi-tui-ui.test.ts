@@ -93,13 +93,83 @@ describe('PiTuiUi', () => {
 
     ui.emit({ type: 'user-message', text: 'hello agent' });
     ui.emit({ type: 'agent-code', text: 'finish("hi")' });
+    ui.emit({ type: 'step', name: 'say hi', description: 'finish the turn' });
     ui.emit({ type: 'final', text: 'hi there' });
     await tick();
 
     const screen = plain(terminal.output);
     expect(screen).toContain('hello agent');
-    expect(screen).toContain('finish("hi")');
+    expect(screen).toContain('say hi');
     expect(screen).toContain('hi there');
+
+    ui.stop();
+  });
+
+  it('folds the code away and shows only the name and the description', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({ model: 'test-model', terminal });
+
+    void ui.run();
+    await tick();
+
+    ui.emit({ type: 'agent-code', text: 'const secret = "hidden";' });
+    ui.emit({ type: 'step', name: 'look around', description: 'see what is here' });
+    await tick();
+
+    const screen = plain(terminal.output);
+    expect(screen).toContain('look around');
+    expect(screen).toContain('see what is here');
+    expect(screen).not.toContain('hidden');
+
+    ui.stop();
+  });
+
+  it('shows the code when the step is asked for', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({ model: 'test-model', terminal });
+
+    void ui.run();
+    await tick();
+
+    ui.emit({ type: 'agent-code', text: 'const secret = "hidden";' });
+    ui.emit({ type: 'step', name: 'look around', description: 'see what is here' });
+    await tick();
+
+    expect(plain(terminal.output)).not.toContain('hidden');
+
+    terminal.onInput?.('\x05');
+    await tick(120);
+
+    expect(plain(terminal.output)).toContain('hidden');
+
+    ui.stop();
+  });
+
+  it('shows the code below its step, not at the end of the transcript', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({ model: 'test-model', terminal });
+
+    void ui.run();
+    await tick();
+
+    ui.emit({ type: 'agent-code', text: 'const secret = "hidden";' });
+    ui.emit({ type: 'step', name: 'look around', description: 'see what is here' });
+    ui.emit({ type: 'final', text: 'the answer' });
+    await tick();
+
+    terminal.onInput?.('\x05');
+    await tick(120);
+
+    const transcript = ui.transcriptText;
+    const step = transcript.indexOf('look around');
+    const code = transcript.indexOf('hidden');
+    const answer = transcript.indexOf('the answer');
+
+    expect(step).toBeGreaterThan(-1);
+    expect(code).toBeGreaterThan(step);
+    // The code belongs to the step, so it comes before the answer that
+    // followed it.
+    expect(answer).toBeGreaterThan(code);
 
     ui.stop();
   });
@@ -149,17 +219,19 @@ describe('PiTuiUi', () => {
 
     ui.emit({ type: 'busy', busy: true });
     ui.emit({ type: 'agent-code', text: 'finish("first")' });
+    ui.emit({ type: 'step', name: 'first step', description: 'end the first turn' });
     ui.emit({ type: 'busy', busy: false });
     ui.emit({ type: 'busy', busy: true });
     ui.emit({ type: 'agent-code', text: 'finish("second")' });
+    ui.emit({ type: 'step', name: 'second step', description: 'end the second turn' });
     await tick();
 
     const screen = plain(terminal.output);
-    // Reusing a single code block would let the last turn overwrite the code
-    // of the earlier ones, so the transcript would show "second" next to the
-    // answer "first".
-    expect(screen).toContain('finish("first")');
-    expect(screen).toContain('finish("second")');
+    // Reusing a single code block would let the last turn overwrite the
+    // label of the earlier ones, so the transcript would show "second" next
+    // to the answer "first".
+    expect(screen).toContain('first step');
+    expect(screen).toContain('second step');
 
     ui.stop();
   });
@@ -175,18 +247,20 @@ describe('PiTuiUi', () => {
     ui.emit({ type: 'busy', busy: true });
     ui.emit({ type: 'agent-code-delta', text: 'console.log("first")' });
     ui.emit({ type: 'agent-code', text: 'console.log("first")' });
+    ui.emit({ type: 'step', name: 'first step', description: 'log the first thing' });
     ui.emit({ type: 'repl-error', text: 'ERROR: first failure' });
 
     // step 2: the model writes code again, and it fails too
     ui.emit({ type: 'agent-code-delta', text: 'console.log("second")' });
     ui.emit({ type: 'agent-code', text: 'console.log("second")' });
+    ui.emit({ type: 'step', name: 'second step', description: 'log the second thing' });
     ui.emit({ type: 'repl-error', text: 'ERROR: second failure' });
     await tick();
 
     const screen = plain(terminal.output);
-    const first = screen.indexOf('console.log("first")');
+    const first = screen.indexOf('first step');
     const firstError = screen.indexOf('ERROR: first failure');
-    const second = screen.indexOf('console.log("second")');
+    const second = screen.indexOf('second step');
     const secondError = screen.indexOf('ERROR: second failure');
 
     expect(first).toBeGreaterThan(-1);
@@ -215,11 +289,12 @@ describe('PiTuiUi', () => {
     ui.emit({ type: 'busy', busy: true });
     ui.emit({ type: 'agent-code-delta', text: 'console.log("second turn")' });
     ui.emit({ type: 'agent-code', text: 'console.log("second turn")' });
+    ui.emit({ type: 'step', name: 'second turn', description: 'log something' });
     await tick();
 
     const screen = plain(terminal.output);
     const errorAt = screen.indexOf('You emitted a tool call.');
-    const codeAt = screen.indexOf('console.log("second turn")');
+    const codeAt = screen.indexOf('second turn');
 
     expect(errorAt).toBeGreaterThan(-1);
     expect(codeAt).toBeGreaterThan(-1);

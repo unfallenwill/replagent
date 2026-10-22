@@ -9,6 +9,8 @@ function observation(overrides: Partial<ReplObservation> = {}): ReplObservation 
     value: undefined,
     error: undefined,
     finalAnswer: undefined,
+    mismatch: undefined,
+    step: undefined,
     ...overrides,
   };
 }
@@ -19,6 +21,13 @@ describe('formatObservation', () => {
       observation({ logs: ['first', 'second'], value: '42', error: 'boom' }),
     );
     expect(text).toBe('<observation>\nfirst\nsecond\n=> 42\nERROR: boom\n</observation>');
+  });
+
+  it('reports a mismatch between the prediction and the result', () => {
+    const text = formatObservation(
+      observation({ value: '5', mismatch: 'MISMATCH: expected 3, got 5' }),
+    );
+    expect(text).toBe('<observation>\n=> 5\nMISMATCH: expected 3, got 5\n</observation>');
   });
 
   it('says so when there is no output', () => {

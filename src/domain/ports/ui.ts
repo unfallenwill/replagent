@@ -12,12 +12,16 @@ export type UiEvent =
   | { readonly type: 'agent-code-delta'; readonly text: string }
   /** The complete JavaScript of one turn. */
   | { readonly type: 'agent-code'; readonly text: string }
+  /** The step that ran: the name the agent gave it and what it was for. */
+  | { readonly type: 'step'; readonly name: string; readonly description: string }
   /** A line the agent's code logged. */
   | { readonly type: 'repl-log'; readonly text: string }
   /** The value the agent's last expression evaluated to. */
   | { readonly type: 'repl-value'; readonly text: string }
   /** The agent's code failed. */
   | { readonly type: 'repl-error'; readonly text: string }
+  /** The result was not what the agent said it expected. */
+  | { readonly type: 'repl-mismatch'; readonly text: string }
   /** The agent called `finish(...)`. */
   | { readonly type: 'final'; readonly text: string }
   /** Neutral information about the run (limits, truncation, retries). */

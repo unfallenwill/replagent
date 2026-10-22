@@ -3,12 +3,20 @@ export interface CliOptions {
   readonly baseUrl: string | undefined;
   readonly maxTokens: number;
   readonly maxSteps: number;
+  /** Where the agent's model of the world is kept. */
+  readonly world: string;
   readonly help: boolean;
 }
 
 export const DEFAULT_MODEL = 'claude-sonnet-4-5';
 export const DEFAULT_MAX_TOKENS = 8192;
 export const DEFAULT_MAX_STEPS = 24;
+
+/**
+ * The world model lives in the project it is a model of, and next to the
+ * work rather than in a hidden place somewhere else.
+ */
+export const DEFAULT_WORLD_PATH = '.replagent/world.json';
 
 export const HELP: string = `replagent - an agent whose only language is javascript
 
@@ -20,6 +28,8 @@ Options:
   --base-url <url>    API base URL (default: $ANTHROPIC_BASE_URL or api.anthropic.com)
   --max-tokens <n>    max tokens per reply (default: ${DEFAULT_MAX_TOKENS})
   --max-steps <n>     max REPL rounds per turn (default: ${DEFAULT_MAX_STEPS})
+  --world <path>      where the agent keeps its model of the world
+                      (default: ${DEFAULT_WORLD_PATH} in the working directory)
   -h, --help          show this help
 
 Environment:
@@ -49,6 +59,7 @@ export function parseArgs(
     baseUrl: flags.baseUrl ?? env['ANTHROPIC_BASE_URL'],
     maxTokens: flags.maxTokens ?? DEFAULT_MAX_TOKENS,
     maxSteps: flags.maxSteps ?? DEFAULT_MAX_STEPS,
+    world: flags.world ?? DEFAULT_WORLD_PATH,
     help: flags.help,
   };
 }
@@ -58,6 +69,7 @@ interface Flags {
   baseUrl: string | undefined;
   maxTokens: number | undefined;
   maxSteps: number | undefined;
+  world: string | undefined;
   help: boolean;
 }
 
@@ -67,6 +79,7 @@ function parseFlags(argv: readonly string[]): Flags {
     baseUrl: undefined,
     maxTokens: undefined,
     maxSteps: undefined,
+    world: undefined,
     help: false,
   };
 
@@ -94,6 +107,10 @@ function parseFlags(argv: readonly string[]): Flags {
         break;
       case '--max-steps':
         flags.maxSteps = readNumber(argv, index, '--max-steps');
+        index += 1;
+        break;
+      case '--world':
+        flags.world = readValue(argv, index, '--world');
         index += 1;
         break;
       default:

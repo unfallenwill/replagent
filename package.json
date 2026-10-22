@@ -1,0 +1,44 @@
+{
+  "name": "replagent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A terminal agent whose only language - and only channel to the world - is a Node.js REPL.",
+  "main": "./dist/main.mjs",
+  "bin": {
+    "replagent": "./dist/main.mjs"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsx src/cli/main.ts",
+    "start": "node dist/main.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check . && eslint .",
+    "lint:fix": "biome check --write . && eslint . --fix",
+    "complexity": "eslint src test --max-warnings 0",
+    "deps": "depcruise src --config .dependency-cruiser.cjs",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run lint && npm run deps && npm run test && npm run build"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.1.0",
+    "@earendil-works/pi-tui": "^1.4.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.2",
+    "@types/node": "^24.0.0",
+    "dependency-cruiser": "^18.7.0",
+    "eslint": "^9.0.0",
+    "tsdown": "^0.23.1",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.72.0",
+    "vitest": "^3.2.4"
+  }
+}

@@ -1,6 +1,7 @@
 import process from 'node:process';
 import { Anthropic } from '@anthropic-ai/sdk';
 import { AnthropicLlm } from '../adapters/anthropic/anthropic-llm.js';
+import { JsBeautifyFormatter } from '../adapters/format/js-beautify.js';
 import { NodeReplSession } from '../adapters/repl/node-repl.js';
 import { PiTuiUi } from '../adapters/tui/pi-tui-ui.js';
 import { runAgentTurn } from '../app/agent.js';
@@ -35,6 +36,7 @@ async function main(): Promise<void> {
   const ui = new PiTuiUi({
     model: options.model,
     endpoint: endpointLabel(client.baseURL),
+    formatter: new JsBeautifyFormatter(),
     onInterrupt: () => {
       currentController?.abort();
     },

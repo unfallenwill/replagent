@@ -1,4 +1,5 @@
 import type { Conversation } from '../domain/conversation.js';
+import { NOT_JAVASCRIPT_ERROR, prepareModelOutput } from '../domain/model-output.js';
 import { formatObservation } from '../domain/observation.js';
 import type { LlmPort, LlmRequest, LlmStopReason } from '../domain/ports/llm.js';
 import type { ReplObservation, ReplPort } from '../domain/ports/repl.js';
@@ -37,18 +38,44 @@ export async function runAgentTurn(
   deps.ui.emit({ type: 'busy', busy: true });
 
   for (let step = 1; step <= deps.maxSteps; step += 1) {
-    const code = await collectCode(deps, conversation, signal);
-    if (code === undefined) {
+    const raw = await collectCode(deps, conversation, signal);
+    if (raw === undefined) {
       deps.ui.emit({ type: 'busy', busy: false });
       return { steps: step - 1, finished: false };
     }
 
-    conversation.append('assistant', code);
-    deps.ui.emit({ type: 'agent-code', text: code });
+    const prepared = prepareModelOutput(raw);
 
-    const observation = await deps.repl.exec(code);
-    emitObservation(deps.ui, observation);
-    conversation.append('user', formatObservation(observation));
+    if (prepared.problem !== undefined) {
+      deps.ui.emit({ type: 'repl-error', text: prepared.problem });
+      conversation.append('assistant', prepared.code);
+      conversation.append(
+        'user',
+        formatObservation({
+          ok: false,
+          logs: [],
+          value: undefined,
+          error: prepared.problem,
+          finalAnswer: undefined,
+        }),
+      );
+      continue;
+    }
+
+    if (prepared.unwrappedToolCall) {
+      deps.ui.emit({
+        type: 'status',
+        text: 'Unwrapped a tool-call envelope from the model output.',
+      });
+    }
+
+    conversation.append('assistant', prepared.code);
+    deps.ui.emit({ type: 'agent-code', text: prepared.code });
+
+    const observation = await deps.repl.exec(prepared.code);
+    const reported = withTeachingNote(prepared.invalidSyntax, observation);
+    emitObservation(deps.ui, reported);
+    conversation.append('user', formatObservation(reported));
 
     if (observation.finalAnswer !== undefined) {
       deps.ui.emit({ type: 'final', text: observation.finalAnswer });
@@ -102,6 +129,17 @@ async function collectCode(
   }
 
   return code;
+}
+
+/**
+ * When the reply was not JavaScript at all, the REPL's parse error is precise
+ * but does not tell the model what it did wrong. Add that.
+ */
+function withTeachingNote(invalidSyntax: boolean, observation: ReplObservation): ReplObservation {
+  if (!invalidSyntax || observation.error === undefined) {
+    return observation;
+  }
+  return { ...observation, error: `${observation.error}\n${NOT_JAVASCRIPT_ERROR}` };
 }
 
 function emitObservation(ui: UiPort, observation: ReplObservation): void {

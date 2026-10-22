@@ -11,6 +11,7 @@ import {
   TuiAltScreen,
   VStack,
 } from '@earendil-works/pi-tui';
+import type { CodeFormatter } from '../../domain/ports/format.js';
 import type { UiEvent, UiPort } from '../../domain/ports/ui.js';
 
 const dim = (text: string): string => `\u001b[2m${text}\u001b[0m`;
@@ -46,6 +47,8 @@ export interface PiTuiOptions {
   readonly mouse?: boolean;
   /** Called when the user interrupts the running turn with the first ctrl+c. */
   readonly onInterrupt?: () => void;
+  /** Pretty-prints the agent's code for display. */
+  readonly formatter?: CodeFormatter;
 }
 
 /**
@@ -240,12 +243,14 @@ export class PiTuiUi implements UiPort {
 
   #appendStreaming(delta: string): void {
     this.#streamingText += delta;
-    this.#ensureStreaming().setText(this.#renderCode(this.#streamingText));
+    // The streaming code is not formatted: it is not valid JavaScript yet,
+    // and formatting on every token would be quadratic.
+    this.#ensureStreaming().setText(this.#renderCode(this.#streamingText, false));
   }
 
   #completeStreaming(code: string): void {
     this.#streamingText = code;
-    this.#ensureStreaming().setText(this.#renderCode(code));
+    this.#ensureStreaming().setText(this.#renderCode(code, true));
     // Every turn gets its own code block. Reusing one block would let the
     // last turn overwrite the code of all earlier turns, so the transcript
     // would show a finish() call next to a question it never answered.
@@ -262,12 +267,21 @@ export class PiTuiUi implements UiPort {
     return this.#streaming;
   }
 
-  #renderCode(code: string): string {
-    const body = code
+  #renderCode(code: string, formatted: boolean): string {
+    const source = formatted ? this.#format(code) : code;
+    const body = source
       .split('\n')
       .map((line) => `${dim('│')} ${line}`)
       .join('\n');
     return `\n${dim('js')}\n${body}`;
+  }
+
+  #format(code: string): string {
+    const formatter = this.#options.formatter;
+    if (formatter === undefined) {
+      return code;
+    }
+    return formatter.format(code);
   }
 
   /**

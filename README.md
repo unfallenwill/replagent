@@ -49,6 +49,42 @@ marker the agent drifts back into being a chat assistant that happens to emit
 JavaScript: it starts answering from what a language model is "supposed" to
 say instead of from what it actually observed.
 
+## The response hook
+
+A text-only protocol is model dependent, and it shows. A model trained with
+tool calling emits a tool call even when no tools are defined - and a gateway
+can only translate that into a structured `tool_use` block when the request
+actually declares tools. With no tools the native envelope leaks into the
+text stream and the REPL chokes on it.
+
+So every reply passes through a hook before it reaches the REPL
+(`src/domain/model-output.ts`):
+
+| Step      | What it does                                      |
+| --------- | ------------------------------------------------- |
+| normalize | strips the invisible characters gateways inject   |
+| unwrap    | digs the code out of a tool call envelope         |
+| validate  | `repl.isValidSyntax` - is this JavaScript at all? |
+
+The unwrapping is dialect agnostic: it recognises the envelope shapes of
+MiniMax (`<content>`, `<invoke>`), OpenAI (`<tool_call>`), Anthropic
+(`{"name": ..., "input": {...}}`) and markdown code fences, and extracts the
+payload - which is usually the code the model wanted to run. When nothing can
+be extracted, the agent is told in plain words that this world has no tools,
+and it usually rewrites itself on the next turn.
+
+Everything the hook produces is a pure function with its own tests, so the
+recovery is testable without a model in the loop.
+
+### If you would rather not rely on that
+
+The alternative is to declare exactly one tool - `repl`, whose only parameter
+is the JavaScript to run. Every tool-capable model then works, the gateway
+translates the tool call properly, and no envelope ever leaks. The price is
+that the reply is no longer literally JavaScript: it is JavaScript inside a
+tool call. The pure-text protocol keeps the agent's language pure; the single
+tool keeps it portable. This project chose the former.
+
 ## Architecture
 
 Four layers, with the dependency direction enforced by `dependency-cruiser`
@@ -117,6 +153,9 @@ of the last expression, the errors, and the final answer.
 
 While the agent is working the status line shows a spinner, so it is always
 clear that a message went out and is being worked on.
+
+The code the agent writes is pretty-printed for the transcript. Formatting is
+display only: what runs is exactly what the model wrote.
 
 ### Scrolling
 

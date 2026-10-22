@@ -1,0 +1,125 @@
+import { describe, expect, it } from 'vitest';
+import { prepareModelOutput } from '../src/domain/model-output.js';
+
+describe('prepareModelOutput', () => {
+  it('passes plain javascript through', () => {
+    const prepared = prepareModelOutput('const a = 1;\nconsole.log(a);');
+    expect(prepared.code).toBe('const a = 1;\nconsole.log(a);');
+    expect(prepared.unwrappedToolCall).toBe(false);
+    expect(prepared.invalidSyntax).toBe(false);
+    expect(prepared.problem).toBeUndefined();
+  });
+
+  it('flags prose as invalid javascript', () => {
+    const prepared = prepareModelOutput('Sure! Here is how you do it:');
+    expect(prepared.invalidSyntax).toBe(true);
+  });
+
+  it('reports an empty reply', () => {
+    const prepared = prepareModelOutput('   ');
+    expect(prepared.problem).toBeDefined();
+    expect(prepared.code).toBe('');
+  });
+
+  it('accepts top level await', () => {
+    const prepared = prepareModelOutput('await Promise.resolve(1)');
+    expect(prepared.invalidSyntax).toBe(false);
+  });
+
+  it('unwraps a minimax style envelope with a content section', () => {
+    const raw = [
+      ']<]minimax[>[<tool_call>',
+      ']<]minimax[>[<invoke name>',
+      ']<]minimax[>[<content>const now = new Date();\nconsole.log(now);</content>',
+      ']<]minimax[>[</invoke>',
+      ']<]minimax[>[</tool_call>',
+    ].join('\n');
+
+    const prepared = prepareModelOutput(raw);
+
+    expect(prepared.unwrappedToolCall).toBe(true);
+    expect(prepared.code).toBe('const now = new Date();\nconsole.log(now);');
+    expect(prepared.problem).toBeUndefined();
+  });
+
+  it('unwraps a minimax style envelope whose payload sits in the invoke section', () => {
+    const raw = [
+      ']<]minimax[>[<tool_call>',
+      ']<]minimax[>[<invoke name>const now = new Date();',
+      'console.log(now);',
+      ']<]minimax[>[</invoke>',
+      ']<]minimax[>[</tool_call>',
+    ].join('\n');
+
+    const prepared = prepareModelOutput(raw);
+
+    expect(prepared.unwrappedToolCall).toBe(true);
+    expect(prepared.code).toBe('const now = new Date();\nconsole.log(now);');
+  });
+
+  it('unwraps an openai style tool call', () => {
+    const raw =
+      '<tool_call>\n{"name": "repl", "arguments": {"code": "const a = 1;\\nconsole.log(a);"}}\n</tool_call>';
+
+    const prepared = prepareModelOutput(raw);
+
+    expect(prepared.unwrappedToolCall).toBe(true);
+    expect(prepared.code).toBe('const a = 1;\nconsole.log(a);');
+  });
+
+  it('unwraps a tool call whose payload is under an unknown key', () => {
+    const raw =
+      '<tool_call>{"name": "repl", "parameters": {"program": "const a = 1;\\nconsole.log(a);"}}</tool_call>';
+
+    const prepared = prepareModelOutput(raw);
+
+    expect(prepared.unwrappedToolCall).toBe(true);
+    expect(prepared.code).toBe('const a = 1;\nconsole.log(a);');
+  });
+
+  it('unwraps an anthropic style json tool call', () => {
+    const raw = '<tool_call>{"name": "repl", "input": {"code": "1 + 1"}}</tool_call>';
+
+    const prepared = prepareModelOutput(raw);
+
+    expect(prepared.unwrappedToolCall).toBe(true);
+    expect(prepared.code).toBe('1 + 1');
+  });
+
+  it('unwraps a markdown code fence', () => {
+    const raw = 'Here you go:\n```js\nconst a = 1;\nconsole.log(a);\n```';
+
+    const prepared = prepareModelOutput(raw);
+
+    expect(prepared.unwrappedToolCall).toBe(true);
+    expect(prepared.code).toBe('const a = 1;\nconsole.log(a);');
+  });
+
+  it('reports a tool call without a usable payload', () => {
+    const prepared = prepareModelOutput('<tool_call>{"name": "search"}</tool_call>');
+
+    expect(prepared.unwrappedToolCall).toBe(true);
+    expect(prepared.problem).toBeDefined();
+  });
+
+  it('does not touch javascript that merely mentions the word tool', () => {
+    const raw = 'const label = "tool_call";\nconsole.log(label);';
+    const prepared = prepareModelOutput(raw);
+
+    expect(prepared.unwrappedToolCall).toBe(false);
+    expect(prepared.code).toBe(raw);
+  });
+
+  it('does not touch ordinary comparisons', () => {
+    const raw = 'const smaller = 1<2;\nconsole.log(smaller);';
+    const prepared = prepareModelOutput(raw);
+
+    expect(prepared.unwrappedToolCall).toBe(false);
+    expect(prepared.code).toBe(raw);
+  });
+
+  it('strips invisible characters injected by gateways', () => {
+    const prepared = prepareModelOutput('const a = 1;\nconsole.log(a);');
+    expect(prepared.code).toBe('const a = 1;\nconsole.log(a);');
+  });
+});

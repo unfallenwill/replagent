@@ -224,10 +224,14 @@ errors, and the final answer.
 
 The code the agent writes is folded away by default. What the transcript
 shows is the step — its name and what it was for — because that is what the
-transcript is for; `ctrl+e` opens the code of the last step and closes it
-again. The code is pretty-printed and coloured for the terminal, and the
-colouring goes on after the formatting, so it lands on the columns you are
-reading.
+transcript is for. The code, the logs and the value all belong to the step
+that produced them, and they open and close with it: `ctrl+e` opens the
+last step and closes it again. The code is pretty-printed and coloured for
+the terminal, and the colouring goes on after the formatting, so it lands on
+the columns you are reading.
+
+A step that failed says so in red, even folded away: a transcript that
+hides the failure is a transcript that lies by omission.
 
 ### Scrolling
 
@@ -244,6 +248,11 @@ search the transcript, `ctrl+e` to open and close the code of the last step.
 - `ctrl+c` twice: the first press interrupts the running turn, the second one
   leaves. Two presses within two seconds, so a stray `ctrl+c` never kills
   the session.
+
+The transcript stays behind. The TUI draws on the alternate screen, and the
+alternate screen is not where the scrollback lives, so on the way out the
+whole transcript is written to the normal screen - the record of what the
+agent did is still there when the shell prompt comes back.
 
 ### Pointing it at a gateway
 

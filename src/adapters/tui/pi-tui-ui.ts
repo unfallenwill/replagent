@@ -61,17 +61,21 @@ export interface PiTuiOptions {
  * silently render nothing.
  */
 /**
- * A block of code the agent wrote.
+ * A step in the transcript.
  *
- * The code is folded away: what the human sees is the step - its name and
- * what it was for - because that is what the transcript is for. The code is
- * one keystroke away for the times when the human wants to see it.
+ * The human sees the title: the name the agent gave the step and what it
+ * was for. Everything the step produced - the code, the logs, the value -
+ * belongs to it, and opens and closes with it. One keystroke away, and
+ * not in the way.
  */
-interface CodeBlock {
+interface StepBlock {
   readonly header: Text;
-  readonly body: Text;
+  readonly code: Text;
+  readonly group: Container;
+  readonly details: Text[];
   label: string;
   expanded: boolean;
+  failed: boolean;
 }
 
 export class PiTuiUi implements UiPort {
@@ -80,7 +84,7 @@ export class PiTuiUi implements UiPort {
   readonly #editor: Editor;
   readonly #status: Text;
   readonly #options: PiTuiOptions;
-  #block: CodeBlock | undefined;
+  #block: StepBlock | undefined;
   #inputHandler: ((text: string) => void) | undefined;
   #done: (() => void) | undefined;
   #stopped = false;
@@ -147,7 +151,7 @@ export class PiTuiUi implements UiPort {
       if (!matchesKey(data, 'ctrl+e')) {
         return undefined;
       }
-      this.#toggleLatestCode();
+      this.#toggleLatestStep();
       return { consume: true };
     });
   }
@@ -205,7 +209,24 @@ export class PiTuiUi implements UiPort {
     await new Promise<void>((resolve) => {
       this.#done = resolve;
     });
-    this.#tui.stop();
+    // The alternate screen is not where the scrollback lives, and the
+    // transcript is worth keeping: leave the alternate screen without
+    // repainting it, and put the whole transcript on the normal screen.
+    this.#tui.stop({ preserveScreen: true });
+    this.#leaveTranscriptBehind();
+  }
+
+  /**
+   * Leave the transcript on the screen.
+   *
+   * The TUI draws on the alternate screen, and the alternate screen goes
+   * away when it does - so without this the human is left with an empty
+   * terminal and no record of what the agent did. Printing the transcript
+   * puts it in the scrollback, where it stays.
+   */
+  #leaveTranscriptBehind(): void {
+    const text = this.#document.render(this.#tui.terminal.columns).join('\n');
+    this.#tui.terminal.write(`${text}\n`);
   }
 
   stop(): void {
@@ -260,13 +281,14 @@ export class PiTuiUi implements UiPort {
         this.#document.addChild(new Text(`\n${bold(cyan('you'))} ${event.text}`));
         return;
       case 'repl-log':
-        this.#document.addChild(new Text(`${dim('  log')} ${event.text}`));
+        this.#addToStep(new Text(`${dim('  log')} ${event.text}`));
         return;
       case 'repl-value':
-        this.#document.addChild(new Text(`${dim('  =>  ')} ${green(event.text)}`));
+        this.#addToStep(new Text(`${dim('  =>  ')} ${green(event.text)}`));
         return;
       case 'repl-error':
-        this.#document.addChild(new Text(`${red('  error')} ${event.text}`));
+        this.#addToStep(new Text(`${red('  error')} ${event.text}`));
+        this.#markFailed();
         return;
       case 'final':
         this.#document.addChild(new Text(`\n${event.text}`));
@@ -278,74 +300,106 @@ export class PiTuiUi implements UiPort {
     }
   }
 
+  /**
+   * Put what the step produced inside the step.
+   *
+   * The logs, the value and the error belong to the step that produced
+   * them, so they open and close with it.
+   */
+  #addToStep(text: Text): void {
+    const block = this.#block;
+    if (block === undefined) {
+      this.#document.addChild(text);
+      return;
+    }
+    block.details.push(text);
+    if (block.expanded) {
+      block.group.addChild(text);
+    }
+  }
+
   #appendStreaming(_delta: string): void {
-    // The code is folded away, so there is nothing to show while it is
-    // being written: the step it turns out to be says more than the code.
+    // The step is folded away, so there is nothing to show while it is
+    // being written: the title it turns out to be says more than the code.
   }
 
   #completeStreaming(code: string): void {
     const header = new Text('');
-    const body = new Text(this.#renderCodeBody(this.#colour(this.#format(code))));
-    const block: CodeBlock = {
+    const group = new Container();
+    group.addChild(header);
+
+    const block: StepBlock = {
       header,
-      body,
+      code: new Text(this.#renderCodeBody(this.#colour(this.#format(code)))),
+      group,
+      details: [],
       label: 'js',
       expanded: false,
+      failed: false,
     };
 
-    this.#document.addChild(header);
+    this.#document.addChild(group);
     this.#block = block;
     header.setText(this.#blockLabel(block));
   }
 
   /**
-   * Show the code of the block, or hide it again.
+   * Open the step, or close it again.
+   *
+   * What opens is everything the step produced: the code it wrote, the
+   * lines it logged, the value it returned. What the human reads without
+   * opening anything is the step itself.
    */
-  #toggleCode(block: CodeBlock): void {
+  #toggleStep(block: StepBlock): void {
     block.expanded = !block.expanded;
+
     if (block.expanded) {
-      this.#insertAfter(block.header, block.body);
+      block.group.addChild(block.code);
+      for (const detail of block.details) {
+        block.group.addChild(detail);
+      }
     } else {
-      this.#document.removeChild(block.body);
+      block.group.removeChild(block.code);
+      for (const detail of block.details) {
+        block.group.removeChild(detail);
+      }
     }
+
     block.header.setText(this.#blockLabel(block));
     this.#tui.requestRender();
   }
 
   /**
-   * Put the code right below the step it belongs to.
+   * Show or hide the step that ran last.
    *
-   * The step's place in the transcript was taken when it was written, so
-   * the code belongs there - between the step and whatever the agent said
-   * after it - and not at the end of the document.
-   */
-  #insertAfter(anchor: Text, component: Text): void {
-    const index = this.#document.children.indexOf(anchor);
-    if (index === -1) {
-      this.#document.addChild(component);
-      return;
-    }
-    this.#document.children.splice(index + 1, 0, component);
-  }
-
-  /**
-   * Show or hide the code of the step that ran last.
-   *
-   * The transcript keeps the code folded away, and the step is what the
-   * human reads. When the code itself is what is wanted, this is the way
+   * The transcript keeps the steps folded away, and the title is what the
+   * human reads. When the step itself is what is wanted, this is the way
    * to get at it.
    */
-  #toggleLatestCode(): void {
+  #toggleLatestStep(): void {
     const block = this.#block;
     if (block === undefined) {
       return;
     }
-    this.#toggleCode(block);
+    this.#toggleStep(block);
   }
 
-  #blockLabel(block: CodeBlock): string {
+  #blockLabel(block: StepBlock): string {
     const marker = block.expanded ? cyan('▼') : dim('▶');
-    return `${marker} ${block.label}`;
+    const title = `${marker} ${block.label}`;
+    // A step that failed says so, even folded away: a transcript that
+    // hides the failure is a transcript that lies by omission.
+    return block.failed ? red(title) : title;
+  }
+
+  /** The last step did not work, and the transcript should not hide it. */
+  #markFailed(): void {
+    const block = this.#block;
+    if (block === undefined) {
+      return;
+    }
+    block.failed = true;
+    block.header.setText(this.#blockLabel(block));
   }
 
   /**
@@ -426,7 +480,7 @@ export class PiTuiUi implements UiPort {
       parts.push(dim(this.#statusText));
     }
     if (this.#block !== undefined && !this.#block.expanded) {
-      parts.push(dim('ctrl+e shows the code'));
+      parts.push(dim('ctrl+e opens the step'));
     }
     this.#status.setText(parts.join('   '));
   }

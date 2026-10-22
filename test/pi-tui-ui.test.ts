@@ -198,6 +198,31 @@ describe('PiTuiUi', () => {
     ui.stop();
   });
 
+  it('leaves the transcript on the screen when it stops', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({ model: 'test-model', terminal });
+
+    void ui.run();
+    await tick();
+
+    ui.emit({ type: 'user-message', text: '你好' });
+    ui.emit({ type: 'agent-code', text: 'const a = 1;' });
+    ui.emit({ type: 'step', name: '打个招呼', description: '向用户问好' });
+    ui.emit({ type: 'final', text: '你好！' });
+    await tick();
+
+    ui.stop();
+    await tick(120);
+
+    // The alternate screen goes away, so the transcript is written to the
+    // normal screen, where the scrollback keeps it.
+    const screen = plain(terminal.output);
+    expect(screen).toContain('打个招呼');
+    expect(screen).toContain('你好！');
+
+    ui.stop();
+  });
+
   it('shows a spinner while the agent is working', async () => {
     const terminal = new FakeTerminal();
     const ui = new PiTuiUi({ model: 'test-model', terminal });
@@ -260,7 +285,7 @@ describe('PiTuiUi', () => {
     ui.stop();
   });
 
-  it('keeps alternating code and error in the order they happened', async () => {
+  it('keeps the steps in the order they happened', async () => {
     const terminal = new FakeTerminal();
     const ui = new PiTuiUi({ model: 'test-model', terminal });
 
@@ -283,14 +308,38 @@ describe('PiTuiUi', () => {
 
     const screen = plain(terminal.output);
     const first = screen.indexOf('first step');
-    const firstError = screen.indexOf('ERROR: first failure');
     const second = screen.indexOf('second step');
-    const secondError = screen.indexOf('ERROR: second failure');
 
     expect(first).toBeGreaterThan(-1);
-    expect(firstError).toBeGreaterThan(first);
-    expect(second).toBeGreaterThan(firstError);
-    expect(secondError).toBeGreaterThan(second);
+    expect(second).toBeGreaterThan(first);
+
+    ui.stop();
+  });
+
+  it('folds the logs and the value into the step', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({ model: 'test-model', terminal });
+
+    void ui.run();
+    await tick();
+
+    ui.emit({ type: 'agent-code', text: 'const a = 1;' });
+    ui.emit({ type: 'step', name: 'a step', description: 'do the thing' });
+    ui.emit({ type: 'repl-log', text: 'a log line' });
+    ui.emit({ type: 'repl-value', text: '42' });
+    await tick();
+
+    const collapsed = plain(terminal.output);
+    expect(collapsed).toContain('a step');
+    expect(collapsed).not.toContain('a log line');
+    expect(collapsed).not.toContain('42');
+
+    terminal.onInput?.('\x05');
+    await tick(120);
+
+    const opened = plain(terminal.output);
+    expect(opened).toContain('a log line');
+    expect(opened).toContain('42');
 
     ui.stop();
   });

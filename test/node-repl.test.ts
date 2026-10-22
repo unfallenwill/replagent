@@ -48,6 +48,31 @@ describe('NodeReplSession', () => {
     expect(observation.logs).toEqual(['hello 42']);
   });
 
+  it('captures console output through the whole console api', async () => {
+    const repl = session();
+    const observation = await repl.exec(
+      'console.log("%s items", 3); console.count("run"); console.table([{ a: 1 }]);',
+    );
+
+    expect(observation.logs[0]).toBe('3 items');
+    expect(observation.logs[1]).toBe('run: 1');
+    expect(observation.logs.join('\n')).toContain('a');
+  });
+
+  it('captures a multi line write as separate lines', async () => {
+    const repl = session();
+    const observation = await repl.exec('console.log("first\\nsecond")');
+
+    expect(observation.logs).toEqual(['first', 'second']);
+  });
+
+  it('captures console errors', async () => {
+    const repl = session();
+    const observation = await repl.exec('console.error("broken")');
+
+    expect(observation.logs).toEqual(['broken']);
+  });
+
   it('reports runtime errors without dying', async () => {
     const repl = session();
     const observation = await repl.exec('throw new Error("boom")');

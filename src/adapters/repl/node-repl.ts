@@ -1,9 +1,9 @@
+import { Console } from 'node:console';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import process from 'node:process';
 import repl from 'node:repl';
-import { PassThrough } from 'node:stream';
-import { inspect } from 'node:util';
+import { PassThrough, Writable } from 'node:stream';
 import type { Context } from 'node:vm';
 import type { ReplObservation, ReplPort } from '../../domain/ports/repl.js';
 
@@ -158,22 +158,34 @@ export class NodeReplSession implements ReplPort {
     return this.#server.writer(value) ?? String(value);
   }
 
+  /**
+   * The agent's console.
+   *
+   * It is Node's own console, pointed at a sink that captures what is
+   * written. The agent gets the console it already knows - format
+   * specifiers, `console.table`, `console.dir`, `console.count` - and every
+   * line it writes becomes an observation.
+   */
   #installConsole(): void {
-    const record = (...args: unknown[]): void => {
-      const text = args
-        .map((value) => (typeof value === 'string' ? value : inspect(value, { depth: 2 })))
-        .join(' ');
-      this.#logs.push(text);
-    };
+    const sink = new Writable({
+      write: (chunk, _encoding, callback) => {
+        this.#capture(String(chunk));
+        callback();
+      },
+    });
 
-    this.#context['console'] = {
-      log: record,
-      error: record,
-      warn: record,
-      info: record,
-      debug: record,
-      trace: record,
-    };
+    this.#context['console'] = new Console({ stdout: sink, stderr: sink });
+  }
+
+  /** Split what was written into the lines an observation is made of. */
+  #capture(text: string): void {
+    const lines = text.split('\n');
+    if (lines.at(-1) === '') {
+      lines.pop();
+    }
+    for (const line of lines) {
+      this.#logs.push(line);
+    }
   }
 
   /**

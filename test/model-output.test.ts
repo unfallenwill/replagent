@@ -148,6 +148,56 @@ describe('prepareModelOutput', () => {
     expect(prepared.code).toBe(raw);
   });
 
+  it('runs a program that mentions a tag', () => {
+    const raw = 'const html = "<div>hello</div>";\nconsole.log(html.length);';
+    const prepared = prepareModelOutput(raw);
+
+    expect(prepared.problem).toBeUndefined();
+    expect(prepared.invalidSyntax).toBe(false);
+    expect(prepared.unwrappedToolCall).toBe(false);
+    expect(prepared.code).toBe(raw);
+  });
+
+  it('does not lift a content section out of a program', () => {
+    const raw = 'const s = "<content>x</content>";\nconsole.log(s.length);';
+    const prepared = prepareModelOutput(raw);
+
+    expect(prepared.problem).toBeUndefined();
+    expect(prepared.code).toBe(raw);
+  });
+
+  it('runs a program that mentions a code fence', () => {
+    const raw = 'const s = "```js\\ncode\\n```";\nconsole.log(s.length);';
+    const prepared = prepareModelOutput(raw);
+
+    expect(prepared.problem).toBeUndefined();
+    expect(prepared.code).toBe(raw);
+  });
+
+  it('unwraps a tool call that arrived as bare json', () => {
+    const raw = '{"name": "repl", "input": {"code": "console.log(1)"}}';
+    const prepared = prepareModelOutput(raw);
+
+    expect(prepared.unwrappedToolCall).toBe(true);
+    expect(prepared.code).toBe('console.log(1)');
+    expect(prepared.problem).toBeUndefined();
+  });
+
+  it('leaves a json program that is not a tool call alone', () => {
+    const raw = '{"answer": 42}';
+    const prepared = prepareModelOutput(raw);
+
+    expect(prepared.unwrappedToolCall).toBe(false);
+    expect(prepared.code).toBe(raw);
+  });
+
+  it('reports prose as prose, not as a tool call', () => {
+    const prepared = prepareModelOutput('Sure! Here is how you do it:');
+
+    expect(prepared.problem).toBeUndefined();
+    expect(prepared.invalidSyntax).toBe(true);
+  });
+
   it('strips invisible characters injected by gateways', () => {
     const prepared = prepareModelOutput('const a = 1;\nconsole.log(a);');
     expect(prepared.code).toBe('const a = 1;\nconsole.log(a);');

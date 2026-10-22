@@ -11,6 +11,11 @@
  *
  * The code that comes out is what gets executed. The formatted version is
  * only ever used for display.
+ *
+ * The rule that matters: a reply that parses as JavaScript *is* the program.
+ * A program that happens to mention a tag, a fence or the word tool is still
+ * a program, and it runs as it is. Only a reply that does not parse is
+ * treated as an envelope to unwrap.
  */
 
 import repl from 'node:repl';
@@ -30,6 +35,16 @@ const TAG = /<\/?[a-zA-Z_][\w.-]*(?:\s[^>]*)?\/?>/;
  * bracket.
  */
 const ENVELOPE_PREFIX = /\][^a-zA-Z0-9]*[a-zA-Z]+[^a-zA-Z0-9]*\[/g;
+
+/** The same shape without the global flag, so it can be tested. */
+const ENVELOPE_MARKER = /\][^a-zA-Z0-9]*[a-zA-Z]+[^a-zA-Z0-9]*\[/;
+
+/**
+ * Tags that only ever appear in a tool call. A program that mentions
+ * `<div>` or `<content>` is a program; a program that mentions one of
+ * these is an envelope.
+ */
+const TOOL_CALL_TAG = /<\/?(?:tool_call|invoke|tool_use)(?:\s[^>]*)?>/i;
 
 /** Payload sections, most specific first. */
 const CODE_SECTIONS = [
@@ -104,7 +119,15 @@ export function prepareModelOutput(text: string): PreparedCode {
     };
   }
 
-  if (!TAG.test(normalized) && !CODE_FENCE.test(normalized)) {
+  // A tool call that arrived as bare JSON, with no envelope around it.
+  const json = bareJsonCode(normalized);
+  if (json !== undefined) {
+    return { ...plain(json), unwrappedToolCall: true };
+  }
+
+  // The reply is a program. Run it as it is - even when it mentions a tag,
+  // a fence or the word tool. Unwrapping is for replies that do not parse.
+  if (isValidSyntax(normalized)) {
     return plain(normalized);
   }
 
@@ -124,12 +147,51 @@ export function prepareModelOutput(text: string): PreparedCode {
     return { ...plain(payload), unwrappedToolCall: true };
   }
 
-  return {
-    code: stripped,
-    unwrappedToolCall: true,
-    invalidSyntax: false,
-    problem: TOOL_CALL_ERROR,
-  };
+  if (looksLikeToolCall(normalized)) {
+    return {
+      code: stripped,
+      unwrappedToolCall: true,
+      invalidSyntax: false,
+      problem: TOOL_CALL_ERROR,
+    };
+  }
+
+  // Neither a program nor an envelope: it is prose, and the REPL will say so.
+  return plain(stripped);
+}
+
+/**
+ * Does this reply carry a tool call that could not be unwrapped?
+ */
+function looksLikeToolCall(text: string): boolean {
+  return TOOL_CALL_TAG.test(text) || ENVELOPE_MARKER.test(text);
+}
+
+/**
+ * A tool call that arrived as nothing but a JSON object:
+ * `{"name": "repl", "input": {"code": "..."}}`.
+ *
+ * Only the whole reply counts - a JSON object inside a program belongs to
+ * the program - and the code it carries has to be JavaScript, or the reply
+ * is simply a program that happens to be JSON.
+ */
+function bareJsonCode(text: string): string | undefined {
+  if (!text.startsWith('{') || !text.endsWith('}')) {
+    return undefined;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+
+  const code = findCode(parsed, 0);
+  if (code === undefined || !isValidSyntax(code)) {
+    return undefined;
+  }
+  return code;
 }
 
 function stripToolCallBlocks(text: string): string {

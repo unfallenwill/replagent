@@ -22,8 +22,14 @@ export const OBSERVATION_CLOSE = '</observation>';
 export function formatObservation(observation: ReplObservation): string {
   const parts: string[] = [];
 
-  for (const log of observation.logs) {
-    parts.push(log);
+  // The logs are the human's window into the run, not the agent's. The
+  // agent gets them when the run failed, because that is when it needs the
+  // evidence; when the run worked, the result is the answer and the rest
+  // is noise the agent would only have to read past.
+  if (!observation.ok) {
+    for (const log of observation.logs) {
+      parts.push(log);
+    }
   }
   if (observation.value !== undefined) {
     parts.push(`=> ${observation.value}`);

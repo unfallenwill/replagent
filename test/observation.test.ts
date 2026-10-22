@@ -15,11 +15,18 @@ function observation(overrides: Partial<ReplObservation> = {}): ReplObservation 
 }
 
 describe('formatObservation', () => {
-  it('reports logs, value and error', () => {
+  it('reports the value and the error, and leaves the logs to the human', () => {
     const text = formatObservation(
       observation({ logs: ['first', 'second'], value: '42', error: 'boom' }),
     );
-    expect(text).toBe('<observation>\nfirst\nsecond\n=> 42\nERROR: boom\n</observation>');
+    expect(text).toBe('<observation>\n=> 42\nERROR: boom\n</observation>');
+  });
+
+  it('reports the logs when the step failed', () => {
+    const text = formatObservation(
+      observation({ ok: false, logs: ['first', 'second'], error: 'boom' }),
+    );
+    expect(text).toBe('<observation>\nfirst\nsecond\nERROR: boom\n</observation>');
   });
 
   it('says so when there is no output', () => {

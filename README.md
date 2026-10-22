@@ -26,8 +26,8 @@ There is no tool protocol, no tool schema, no parser for code fences. The
 loop is four steps:
 1. The model writes JavaScript. That is its entire reply.
 2. The REPL runs it in a persistent context.
-3. The observation — every `console.log` line, the value the step returned,
-   or the error — goes back to the model as the next turn.
+3. The observation — the value the step returned, or the error, plus the
+   lines it logged if it failed — goes back to the model as the next turn.
 4. Repeat, until the model calls `finish("...")`, which ends the turn and
    delivers the final answer.
 
@@ -107,10 +107,15 @@ and read what the agent believes.
 
 ### The world does not tell you what it means
 
-The world is a plain witness. It reports what happened - the lines that were
-logged, the value the step returned, the error - and it stops there. It does
-not check the agent's conclusions against reality, and it does not decide
-what the agent should have been looking for.
+The world is a plain witness. It reports what happened - the value the step
+returned, the error, and the lines it logged when it failed - and it stops
+there. It does not check the agent's conclusions against reality, and it
+does not decide what the agent should have been looking for.
+
+The logs are the human's window into the run, not the agent's. The agent
+gets the value a step returned, which is the one thing it asked for; when
+a step fails, it gets the logs as well, because that is when the evidence
+matters. What the agent wants to know, it returns.
 
 That restraint is deliberate. While the agent is exploring it does not know
 yet what it is looking for, and a world that guesses on its behalf would

@@ -172,24 +172,36 @@ done.
 You think in JavaScript, like a human thinks in language. To reason, you
 write code that records your reasoning:
 
-  await step("look at the layout", "read the project directory", async (name, description) => {
+  (async () => {
     console.log("The file listing is the fastest way to learn the layout");
     const entries = await fs.promises.readdir(".");
     return entries.length;
-  });
+  })();
 
-The value of every console.log line is returned to you as an observation and
-is also shown to the human. Use it deliberately: it is your voice.
+What the human sees is the step: its name, what it was for, and the lines
+it logged. What you get back is the value it returned. That is the whole
+of the arrangement - the logs are their window into the run, and the return
+value is yours.
 
-What the step returns comes back to you as \`=> <value>\`. Return the value
-you care about.
+If a step fails, you get the lines it logged as well, because that is when
+the evidence matters. If you want to know something yourself, return it.
+
+To use the result of a computation, return it:
+
+  (async () => {
+    const entries = await fs.promises.readdir(".");
+    return entries.length;
+  })()
+
+The result comes back to you as \`=> <value>\`. Return the value you care
+about.
 
 ## What you perceive
 
 After each execution you receive exactly one observation, wrapped in
 \`<observation>\` and \`</observation>\` tags. It contains:
 
-  - every line you logged
+  - every line you logged, if the step failed
   - the value your step returned (\`=> ...\`)
   - an error, if the code failed (\`ERROR: ...\`)
 
@@ -291,10 +303,10 @@ and puts the question in front of the human.
   intentions.
 - console.log shows an object two levels deep; deeper values come back as
   [Object]. Use JSON.stringify(value) when you need the whole shape.
-- Log what you need to decide, not everything you saw. The REPL keeps an
-  observation from running away: a long line is cut and it says how much
-  was cut, and a long run of lines is cut too. Log a slice to see the
-  part you meant.
+- Log for the human, not for yourself: they see the lines you log, you see
+  the value you return. What you need to know, you return.
+- Log the part the human needs to see, not everything you saw. Long output
+  is cut short, and it crowds out what comes after it.
 - If you get an error, read it carefully and fix it in your next step.
 - Keep your code free of side effects you do not intend.
 

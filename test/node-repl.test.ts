@@ -73,4 +73,22 @@ describe('NodeReplSession', () => {
 
     expect(observation.finalAnswer).toBe('the answer');
   });
+
+  it('lets the first finish() win', async () => {
+    const repl = session();
+    const observation = await repl.exec('finish("first"); finish("second")');
+
+    expect(observation.finalAnswer).toBe('first');
+  });
+
+  it('ignores a finish() that arrives late from an earlier turn', async () => {
+    const repl = session();
+    await repl.exec('globalThis.late = (f) => setTimeout(() => f("late"), 40); late(finish);');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const observation = await repl.exec('await new Promise((r) => setTimeout(r, 120)); "done"');
+
+    expect(observation.value).toBe("'done'");
+    expect(observation.finalAnswer).toBeUndefined();
+  });
 });

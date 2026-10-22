@@ -57,6 +57,7 @@ export class NodeReplSession implements ReplPort {
   readonly #filename: string;
   readonly #logs: string[] = [];
   #finalAnswer: string | undefined;
+  #execToken = 0;
   #onUncaught: ((text: string) => void) | undefined;
 
   constructor(options: NodeReplOptions = {}) {
@@ -77,14 +78,16 @@ export class NodeReplSession implements ReplPort {
     this.#filename = options.filename ?? 'replagent';
 
     this.#installConsole();
-    this.#installFinish();
     this.#installRequire(options.cwd ?? process.cwd());
     this.#tapUncaught(output);
   }
 
   async exec(code: string): Promise<ReplObservation> {
+    this.#execToken += 1;
+    const token = this.#execToken;
     this.#logs.length = 0;
     this.#finalAnswer = undefined;
+    this.#installFinish(token);
 
     const outcome = await this.#evaluate(code);
     const logs = [...this.#logs];
@@ -173,8 +176,22 @@ export class NodeReplSession implements ReplPort {
     };
   }
 
-  #installFinish(): void {
+  /**
+   * `finish` is rebound for every turn.
+   *
+   * The binding captures the turn it belongs to, so a `finish()` that arrives
+   * late (from a timer started in an earlier turn) cannot end the current
+   * one. Within a turn the first `finish()` wins - it ends the turn, and
+   * anything after it is ignored.
+   */
+  #installFinish(token: number): void {
     this.#context['finish'] = (answer: unknown): void => {
+      if (token !== this.#execToken) {
+        return;
+      }
+      if (this.#finalAnswer !== undefined) {
+        return;
+      }
       this.#finalAnswer =
         typeof answer === 'string' ? answer : (this.#render(answer) ?? String(answer));
     };

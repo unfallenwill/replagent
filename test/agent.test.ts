@@ -109,7 +109,7 @@ describe('runAgentTurn', () => {
       'assistant',
       'user',
     ]);
-    expect(conversation.messages[2]?.text).toBe('=> undefined');
+    expect(conversation.messages[2]?.text).toBe('<observation>\n=> undefined\n</observation>');
   });
 
   it('stops when the agent calls finish()', async () => {

@@ -139,4 +139,75 @@ describe('PiTuiUi', () => {
 
     ui.stop();
   });
+
+  it('gives every turn its own code block', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({ model: 'test-model', terminal });
+
+    void ui.run();
+    await tick();
+
+    ui.emit({ type: 'agent-code', text: 'finish("first")' });
+    ui.emit({ type: 'final', text: 'first' });
+    ui.emit({ type: 'agent-code', text: 'finish("second")' });
+    ui.emit({ type: 'final', text: 'second' });
+    await tick();
+
+    const screen = plain(terminal.output);
+    // Reusing a single code block would let the last turn overwrite the code
+    // of the earlier ones, so the transcript would show "second" next to the
+    // answer "first".
+    expect(screen).toContain('finish("first")');
+    expect(screen).toContain('finish("second")');
+
+    ui.stop();
+  });
+
+  it('interrupts on the first ctrl+c and quits on the second', async () => {
+    const terminal = new FakeTerminal();
+    let interrupts = 0;
+    const ui = new PiTuiUi({
+      model: 'test-model',
+      terminal,
+      onInterrupt: () => {
+        interrupts += 1;
+      },
+    });
+
+    const running = ui.run();
+    await tick();
+
+    terminal.onInput?.('\x03');
+    await tick();
+
+    expect(interrupts).toBe(1);
+    expect(plain(terminal.output)).toContain('press ctrl+c again to quit');
+
+    terminal.onInput?.('\x03');
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it('scrolls the transcript with the mouse wheel', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({ model: 'test-model', terminal });
+
+    void ui.run();
+    await tick();
+
+    for (let index = 0; index < 60; index += 1) {
+      ui.emit({ type: 'repl-log', text: `line ${index}` });
+    }
+    await tick(120);
+
+    const before = ui.transcriptScrollTop;
+    expect(before).toBeGreaterThan(0);
+
+    // SGR mouse wheel up: button 64, column 10, row 10
+    terminal.onInput?.('\x1b[<64;10;10M');
+    await tick(120);
+
+    expect(ui.transcriptScrollTop).toBeLessThan(before);
+
+    ui.stop();
+  });
 });

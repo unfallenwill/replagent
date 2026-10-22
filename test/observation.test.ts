@@ -18,10 +18,16 @@ describe('formatObservation', () => {
     const text = formatObservation(
       observation({ logs: ['first', 'second'], value: '42', error: 'boom' }),
     );
-    expect(text).toBe('first\nsecond\n=> 42\nERROR: boom');
+    expect(text).toBe('<observation>\nfirst\nsecond\n=> 42\nERROR: boom\n</observation>');
   });
 
   it('says so when there is no output', () => {
-    expect(formatObservation(observation())).toBe('(no output)');
+    expect(formatObservation(observation())).toBe('<observation>\n(no output)\n</observation>');
+  });
+
+  it('marks the observation so it cannot be mistaken for the human', () => {
+    const text = formatObservation(observation({ logs: ['hello'] }));
+    expect(text.startsWith('<observation>')).toBe(true);
+    expect(text.endsWith('</observation>')).toBe(true);
   });
 });

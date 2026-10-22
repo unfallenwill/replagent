@@ -32,17 +32,23 @@ async function main(): Promise<void> {
     ...(options.baseUrl !== undefined ? { baseURL: options.baseUrl } : {}),
   });
 
-  const ui = new PiTuiUi({ model: options.model, endpoint: endpointLabel(client.baseURL) });
+  const ui = new PiTuiUi({
+    model: options.model,
+    endpoint: endpointLabel(client.baseURL),
+    onInterrupt: () => {
+      currentController?.abort();
+    },
+  });
   const llm = new AnthropicLlm({
     client,
     model: options.model,
   });
   const repl = new NodeReplSession();
   const conversation = new Conversation();
-  const controller = new AbortController();
 
   const queue: string[] = [];
   let running = false;
+  let currentController: AbortController | undefined;
 
   const drain = async (): Promise<void> => {
     try {
@@ -51,6 +57,8 @@ async function main(): Promise<void> {
         if (next === undefined) {
           break;
         }
+        const controller = new AbortController();
+        currentController = controller;
         await runAgentTurn(
           {
             llm,
@@ -64,6 +72,7 @@ async function main(): Promise<void> {
           next,
           controller.signal,
         );
+        currentController = undefined;
       }
     } catch (error) {
       ui.emit({ type: 'repl-error', text: error instanceof Error ? error.message : String(error) });
@@ -82,7 +91,9 @@ async function main(): Promise<void> {
   });
 
   process.on('SIGINT', () => {
-    controller.abort();
+    // The terminal is in raw mode, so ctrl+c arrives as a key press and never
+    // as SIGINT. This is the escape hatch for the moments when the TUI is not
+    // in charge of the terminal.
     ui.stop();
   });
 

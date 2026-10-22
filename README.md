@@ -41,6 +41,14 @@ If the model writes prose instead of JavaScript, the REPL returns a
 `SyntaxError` and the model sees it. The protocol punishes nothing; it just
 reports.
 
+### Observations are marked
+
+Every observation comes back wrapped in `<observation>` tags, so the model can
+never confuse "the machine answered" with "the human spoke". Without that
+marker the agent drifts back into being a chat assistant that happens to emit
+JavaScript: it starts answering from what a language model is "supposed" to
+say instead of from what it actually observed.
+
 ## Architecture
 
 Four layers, with the dependency direction enforced by `dependency-cruiser`
@@ -109,6 +117,22 @@ of the last expression, the errors, and the final answer.
 
 While the agent is working the status line shows a spinner, so it is always
 clear that a message went out and is being worked on.
+
+### Scrolling
+
+Mouse capture is on, so the wheel scrolls the transcript (without it the
+terminal turns the wheel into cursor keys, and the editor walks through its
+input history instead). Selecting text with the mouse copies it.
+
+Keyboard: `pageUp` / `pageDown`, `ctrl+home` / `ctrl+end`, `ctrl+f` to
+search the transcript.
+
+### Leaving
+
+- `/quit` (or `/exit`) in the input line
+- `ctrl+c` twice: the first press interrupts the running turn, the second one
+  leaves. Two presses within two seconds, so a stray `ctrl+c` never kills
+  the session.
 
 ### Pointing it at a gateway
 

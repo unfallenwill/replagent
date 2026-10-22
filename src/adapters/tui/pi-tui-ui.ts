@@ -2,6 +2,7 @@ import {
   Container,
   Editor,
   type EditorTheme,
+  matchesKey,
   ProcessTerminal,
   ScrollView,
   type SelectListTheme,
@@ -33,6 +34,7 @@ const editorTheme: EditorTheme = {
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const SPINNER_INTERVAL_MS = 80;
+const QUIT_CONFIRM_MS = 2000;
 
 export interface PiTuiOptions {
   readonly model: string;
@@ -40,6 +42,10 @@ export interface PiTuiOptions {
   readonly terminal?: Terminal;
   /** Host the agent talks to, shown in the header. */
   readonly endpoint?: string;
+  /** Capture mouse events so the wheel scrolls the transcript. Default: true. */
+  readonly mouse?: boolean;
+  /** Called when the user interrupts the running turn with the first ctrl+c. */
+  readonly onInterrupt?: () => void;
 }
 
 /**
@@ -59,18 +65,28 @@ export class PiTuiUi implements UiPort {
   readonly #document: Container;
   readonly #editor: Editor;
   readonly #status: Text;
+  readonly #options: PiTuiOptions;
   #streaming: Text | undefined;
   #streamingText = '';
   #inputHandler: ((text: string) => void) | undefined;
   #done: (() => void) | undefined;
   #stopped = false;
   #busy = false;
+  #statusText: string | undefined;
+  #quitHint: string | undefined;
+  #quitTimer: NodeJS.Timeout | undefined;
   #spinnerTimer: NodeJS.Timeout | undefined;
   #spinnerFrame = 0;
 
   constructor(options: PiTuiOptions) {
+    this.#options = options;
     this.#tui = new TuiAltScreen(options.terminal ?? new ProcessTerminal(), true, undefined, {
-      mouse: false,
+      // The wheel has to reach the app as a mouse event: without mouse
+      // capture the terminal turns it into cursor keys, which the editor
+      // happily interprets as "walk through my input history" instead of
+      // "scroll the transcript".
+      mouse: options.mouse ?? true,
+      scrollToEndIndicator: () => dim(' ↓ jump to latest '),
     });
     this.#document = new Container();
     this.#status = new Text('');
@@ -102,6 +118,16 @@ export class PiTuiUi implements UiPort {
 
     this.#tui.setLayoutRoot(root);
     this.#tui.setFocus(this.#editor);
+
+    // ctrl+c never reaches the editor: the first press interrupts the turn,
+    // the second one leaves.
+    this.#tui.addInputListener((data) => {
+      if (!matchesKey(data, 'ctrl+c')) {
+        return undefined;
+      }
+      this.#handleInterrupt();
+      return { consume: true };
+    });
   }
 
   emit(event: UiEvent): void {
@@ -121,6 +147,16 @@ export class PiTuiUi implements UiPort {
     this.#inputHandler = handler;
   }
 
+  /** How far the transcript is scrolled away from its end. 0 means "at the end". */
+  get transcriptScrollTop(): number {
+    return this.#tui.viewportTop;
+  }
+
+  /** True when the transcript is pinned to the newest output. */
+  get isFollowingOutput(): boolean {
+    return this.#tui.isFollowingOutput;
+  }
+
   async run(): Promise<void> {
     if (this.#stopped) {
       return;
@@ -134,7 +170,7 @@ export class PiTuiUi implements UiPort {
 
   stop(): void {
     this.#stopped = true;
-    this.#stopSpinner();
+    this.#clearTimers();
     const done = this.#done;
     this.#done = undefined;
     done?.();
@@ -151,6 +187,29 @@ export class PiTuiUi implements UiPort {
     }
     this.#editor.addToHistory(trimmed);
     this.#inputHandler?.(trimmed);
+  }
+
+  /**
+   * First ctrl+c interrupts the running turn, second one quits. Two presses
+   * within two seconds, so a stray ctrl+c never kills the session.
+   */
+  #handleInterrupt(): void {
+    if (this.#quitHint !== undefined) {
+      this.stop();
+      return;
+    }
+
+    this.#quitHint = 'press ctrl+c again to quit';
+    this.#quitTimer = setTimeout(() => {
+      this.#quitTimer = undefined;
+      this.#quitHint = undefined;
+      this.#renderStatus();
+    }, QUIT_CONFIRM_MS);
+    this.#quitTimer.unref();
+
+    this.#renderStatus();
+    this.#options.onInterrupt?.();
+    this.#tui.requestRender();
   }
 
   #appendBlock(
@@ -173,7 +232,8 @@ export class PiTuiUi implements UiPort {
         this.#document.addChild(new Text(`\n${bold('answer')} ${event.text}`));
         return;
       case 'status':
-        this.#status.setText(dim(event.text));
+        this.#statusText = event.text;
+        this.#renderStatus();
         return;
     }
   }
@@ -186,6 +246,11 @@ export class PiTuiUi implements UiPort {
   #completeStreaming(code: string): void {
     this.#streamingText = code;
     this.#ensureStreaming().setText(this.#renderCode(code));
+    // Every turn gets its own code block. Reusing one block would let the
+    // last turn overwrite the code of all earlier turns, so the transcript
+    // would show a finish() call next to a question it never answered.
+    this.#streaming = undefined;
+    this.#streamingText = '';
   }
 
   #ensureStreaming(): Text {
@@ -212,31 +277,45 @@ export class PiTuiUi implements UiPort {
    */
   #setBusy(busy: boolean): void {
     this.#busy = busy;
-    if (!busy) {
-      this.#stopSpinner();
-      this.#status.setText('');
-      return;
+    if (busy) {
+      if (this.#spinnerTimer === undefined) {
+        this.#spinnerTimer = setInterval(() => {
+          this.#spinnerFrame += 1;
+          this.#renderStatus();
+          this.#tui.requestRender();
+        }, SPINNER_INTERVAL_MS);
+        this.#spinnerTimer.unref();
+      }
+    } else if (this.#spinnerTimer !== undefined) {
+      clearInterval(this.#spinnerTimer);
+      this.#spinnerTimer = undefined;
     }
-    if (this.#spinnerTimer !== undefined) {
-      return;
-    }
-    this.#spinnerTimer = setInterval(() => {
-      const frame = SPINNER_FRAMES[this.#spinnerFrame % SPINNER_FRAMES.length] ?? '';
-      this.#spinnerFrame += 1;
-      this.#status.setText(`${cyan(frame)} ${dim('working…')}`);
-      this.#tui.requestRender();
-    }, SPINNER_INTERVAL_MS);
-    this.#spinnerTimer.unref();
+    this.#renderStatus();
   }
 
-  #stopSpinner(): void {
+  #renderStatus(): void {
+    const parts: string[] = [];
+    if (this.#busy) {
+      const frame = SPINNER_FRAMES[this.#spinnerFrame % SPINNER_FRAMES.length] ?? '';
+      parts.push(`${cyan(frame)} ${dim('working…')}`);
+    }
+    if (this.#quitHint !== undefined) {
+      parts.push(dim(this.#quitHint));
+    }
+    if (this.#statusText !== undefined && this.#statusText.length > 0) {
+      parts.push(dim(this.#statusText));
+    }
+    this.#status.setText(parts.join('   '));
+  }
+
+  #clearTimers(): void {
     if (this.#spinnerTimer !== undefined) {
       clearInterval(this.#spinnerTimer);
       this.#spinnerTimer = undefined;
     }
-    if (this.#busy) {
-      this.#busy = false;
-      this.#status.setText('');
+    if (this.#quitTimer !== undefined) {
+      clearTimeout(this.#quitTimer);
+      this.#quitTimer = undefined;
     }
   }
 }

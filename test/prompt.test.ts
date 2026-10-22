@@ -21,6 +21,46 @@ describe('SYSTEM_PROMPT', () => {
     expect(SYSTEM_PROMPT).toContain('finish(');
   });
 
+  it('gives the agent a model of the world', () => {
+    expect(SYSTEM_PROMPT).toContain('world.observe(');
+    expect(SYSTEM_PROMPT).toContain('world.believe(');
+    expect(SYSTEM_PROMPT).toContain('world.report()');
+  });
+
+  it('tells the agent that a reply is a named, described step', () => {
+    expect(SYSTEM_PROMPT).toContain('await step(');
+    expect(SYSTEM_PROMPT).toContain('async (name, description) => {');
+    expect(SYSTEM_PROMPT).toContain('Both are required');
+  });
+
+  it('tells the agent that a step is its own working memory', () => {
+    expect(SYSTEM_PROMPT).toContain('The step is your working memory');
+    expect(SYSTEM_PROMPT).toContain('globalThis');
+  });
+
+  it('tells the agent that observations and conclusions are different things', () => {
+    expect(SYSTEM_PROMPT).toContain('Never let the second pass for the first');
+    expect(SYSTEM_PROMPT).toContain(
+      'Not observing something is not the same as it not being there',
+    );
+  });
+
+  it('tells the agent that the REPL checks its predictions', () => {
+    expect(SYSTEM_PROMPT).toContain('expect(value)');
+    expect(SYSTEM_PROMPT).toContain('MISMATCH: expected 4, got 3');
+  });
+
+  it('gives the agent a loop to work in', () => {
+    expect(SYSTEM_PROMPT).toContain('observe    read what came back');
+    expect(SYSTEM_PROMPT).toContain('compare');
+    expect(SYSTEM_PROMPT).toContain('correct');
+  });
+
+  it('tells the agent what it is trying to achieve', () => {
+    expect(SYSTEM_PROMPT).toContain("The human's goal comes first");
+    expect(SYSTEM_PROMPT).toContain('You are not finished when your code runs');
+  });
+
   it('tells the agent what it can reach', () => {
     expect(SYSTEM_PROMPT).toContain('await fetch(url)');
     expect(SYSTEM_PROMPT).toContain('node:child_process');

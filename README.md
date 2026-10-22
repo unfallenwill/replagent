@@ -13,9 +13,7 @@ and what its last expression evaluates to is all it ever learns.
 ```
 you ▸ how many files are in this directory?
 
-js ▸ const fs = require("node:fs");
-     fs.readdirSync(".").length
-
+▶ count the files - read the directory and count what is in it
    log   scanning
    =>    42
 
@@ -28,14 +26,37 @@ There is no tool protocol, no tool schema, no parser for code fences. The
 loop is four steps:
 1. The model writes JavaScript. That is its entire reply.
 2. The REPL runs it in a persistent context.
-3. The observation — every `console.log` line, the value of the last
-   expression, or the error — goes back to the model as the next turn.
+3. The observation — every `console.log` line, the value the step returned,
+   or the error — goes back to the model as the next turn.
 4. Repeat, until the model calls `finish("...")`, which ends the turn and
    delivers the final answer.
 
-Because the REPL context persists, `let`/`const`, required modules and
-top-level `await` survive between turns. The REPL _is_ the agent's memory
-and scratchpad.
+A reply is one **step**: a name, a description of what it is for, and the
+program.
+
+```js
+await step(
+  'count the files',
+  'read the directory and count what is in it',
+  async (name, description) => {
+    const entries = await fs.promises.readdir('.');
+    return entries.length;
+  },
+);
+```
+
+Both the name and the description are required — the REPL refuses a step
+without them, and it keeps them _before_ the program runs, so what the agent
+intended is on record before what happened. The program gets both, so it can
+label itself.
+
+The step is the agent's working memory and it is gone when the step
+returns: one reply is one thought, and one thought does not leave a mess
+behind. That leaves two things that outlive a reply — the world model
+below, and `globalThis` for the rare thing too big or too raw for it.
+
+Because the REPL context persists, `require`d modules and `globalThis`
+survive between turns.
 
 If the model writes prose instead of JavaScript, the REPL returns a
 `SyntaxError` and the model sees it. The protocol punishes nothing; it just
@@ -48,6 +69,55 @@ never confuse "the machine answered" with "the human spoke". Without that
 marker the agent drifts back into being a chat assistant that happens to emit
 JavaScript: it starts answering from what a language model is "supposed" to
 say instead of from what it actually observed.
+
+## The agent's world model
+
+A prompt is a prior, not a mechanism. The rules in the system prompt say how
+the agent should think about the world - what it is made of, what it may
+know about it, what it is trying to achieve - but a rule that changes
+nothing is a habit, not a capability. So the world the prompt describes has
+to exist in the runtime too.
+
+The agent keeps a model of the world, and the REPL keeps it for it
+(`src/domain/world.ts`):
+
+```js
+world.observe('module count', 4, 'readdir src'); // what it saw
+world.believe('the build is broken', true, 0.6, 'the tests failed');
+world.plan('read the server log'); // what it will do
+console.log(world.report()); // the whole model
+```
+
+Facts and beliefs are kept apart on purpose. A fact is something that was
+observed, a belief is something that was concluded, and the second one can be
+wrong. Both remember where they came from and when, because the world keeps
+moving: a fact you observed ten minutes ago may no longer hold.
+
+The model outlives the session. It is written to `.replagent/world.json` in
+the working directory (`--world <path>` to put it somewhere else), so the
+agent's experience survives its own restart, and the human can open the file
+and read what the agent believes.
+
+### The REPL checks the predictions
+
+The other half of the loop is that a belief has to be able to be wrong. The
+agent states what it expects, and the REPL compares it with what the run
+actually produced:
+
+```js
+expect(4);
+const files = await fs.promises.readdir('src');
+files.length;
+```
+
+```
+MISMATCH: expected 4, got 3
+```
+
+That line is not a failed run - it is the agent's model of the world being
+wrong, and it is the cheapest information the agent will ever get. Without
+it, an agent that guessed right looks exactly like an agent that understood
+the world, and nothing in the transcript tells them apart.
 
 ## The response hook
 
@@ -96,12 +166,12 @@ rather than by convention:
     └────────►  adapters ───────────────────┘
 ```
 
-| Layer          | Contains                                    | May depend on                            |
-| -------------- | ------------------------------------------- | ---------------------------------------- |
-| `src/domain`   | ports, conversation, observation formatting | nothing (no third-party packages at all) |
-| `src/app`      | the agent loop, the system prompt           | `domain`                                 |
-| `src/adapters` | Anthropic, `node:repl`, pi-tui              | `domain`                                 |
-| `src/cli`      | argument parsing, wiring                    | everything                               |
+| Layer          | Contains                                                     | May depend on                            |
+| -------------- | ------------------------------------------------------------ | ---------------------------------------- |
+| `src/domain`   | ports, conversation, observation formatting, the world model | nothing (no third-party packages at all) |
+| `src/app`      | the agent loop, the system prompt                            | `domain`                                 |
+| `src/adapters` | Anthropic, `node:repl`, pi-tui, the world file               | `domain`                                 |
+| `src/cli`      | argument parsing, wiring                                     | everything                               |
 
 The rules are enforced in `.dependency-cruiser.cjs`:
 - `domain` may not import `app`, `adapters`, `cli`, **or any npm package**
@@ -121,7 +191,7 @@ The rules are enforced in `.dependency-cruiser.cjs`:
 | Complexity   | Biome `noExcessiveCognitiveComplexity` | cognitive complexity ≤ 15                                                                                                                                                                                |
 | Architecture | `dependency-cruiser`                   | the layering above                                                                                                                                                                                       |
 | Style        | Biome                                  | formatting and correctness linting                                                                                                                                                                       |
-| Tests        | `vitest`                               | 19 tests, including real `node:repl` integration                                                                                                                                                         |
+| Tests        | `vitest`                               | 121 tests, including real `node:repl` integration                                                                                                                                                        |
 
 Each gate has been verified to actually fail on a violation, not just to
 pass on good code.
@@ -140,6 +210,8 @@ Options:
   --base-url <url>    API base URL (default: $ANTHROPIC_BASE_URL or api.anthropic.com)
   --max-tokens <n>    max tokens per reply (default: 8192)
   --max-steps <n>     max REPL rounds per turn (default: 24)
+  --world <path>      where the agent keeps its model of the world
+                      (default: .replagent/world.json in the working directory)
 ```
 
 In the app: `/quit` leaves.
@@ -148,14 +220,15 @@ In the app: `/quit` leaves.
 
 The transcript is a scrollable viewport (alternate screen) with the editor
 pinned at the bottom. Everything the agent does appears there: your own
-message is echoed, the JavaScript it writes, what the REPL logged, the value
-of the last expression, the errors, and the final answer.
+message is echoed, what the REPL logged, the value the step returned, the
+errors, the mismatches between what the agent expected and what it got, and
+the final answer.
 
-While the agent is working the status line shows a spinner, so it is always
-clear that a message went out and is being worked on.
-
-The code the agent writes is pretty-printed for the transcript. Formatting is
-display only: what runs is exactly what the model wrote.
+The code the agent writes is folded away by default. What the transcript
+shows is the step — its name and what it was for — because that is what the
+transcript is for; `ctrl+e` opens the code of the last step and closes it
+again. The code is pretty-printed for the transcript. Formatting is display
+only: what runs is exactly what the model wrote.
 
 ### Scrolling
 
@@ -164,7 +237,7 @@ terminal turns the wheel into cursor keys, and the editor walks through its
 input history instead). Selecting text with the mouse copies it.
 
 Keyboard: `pageUp` / `pageDown`, `ctrl+home` / `ctrl+end`, `ctrl+f` to
-search the transcript.
+search the transcript, `ctrl+e` to open and close the code of the last step.
 
 ### Leaving
 

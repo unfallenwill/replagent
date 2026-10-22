@@ -152,6 +152,51 @@ describe('AnthropicLlm', () => {
     expect(usages).toEqual([{ input: 520, output: 42, cached: 400 }]);
   });
 
+  it('reads the prompt from the stop event when the start carries zeroes', async () => {
+    // Some gateways open the message with empty counters and only report
+    // the real totals alongside the stop reason. The counters are
+    // cumulative, so the last value wins.
+    const { client } = fakeClient([
+      {
+        type: 'message_start',
+        message: { usage: { input_tokens: 0, output_tokens: 0 } },
+      },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '1;' } },
+      {
+        type: 'message_delta',
+        delta: { stop_reason: 'end_turn' },
+        usage: {
+          input_tokens: 100,
+          output_tokens: 42,
+          cache_read_input_tokens: 400,
+          cache_creation_input_tokens: 20,
+        },
+      },
+    ]);
+    const llm = new AnthropicLlm({ client, model: 'test-model' });
+
+    const done = await drainDone(llm);
+
+    expect(done?.usage).toEqual({ input: 520, output: 42, cached: 400 });
+  });
+
+  it('reports no usage when the endpoint accounts for no prompt at all', async () => {
+    // A run of zeroes is not an empty prompt: it is an endpoint that did
+    // not say what the prompt weighed, and the bar must not claim 0.
+    const { client } = fakeClient([
+      {
+        type: 'message_delta',
+        delta: { stop_reason: 'end_turn' },
+        usage: { input_tokens: 0, output_tokens: 42 },
+      },
+    ]);
+    const llm = new AnthropicLlm({ client, model: 'test-model' });
+
+    const done = await drainDone(llm);
+
+    expect(done !== undefined && 'usage' in done).toBe(false);
+  });
+
   it('omits the cache count when the API reports no cache accounting', async () => {
     const { client } = fakeClient([
       { type: 'message_start', message: { usage: { input_tokens: 100, output_tokens: 1 } } },

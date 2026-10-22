@@ -13,7 +13,7 @@ and what its last expression evaluates to is all it ever learns.
 ```
 you how many files are in this directory?
 
-▶ count the files - read the directory and count what is in it
+● count the files - read the directory and count what is in it
    log   scanning
    =>    42
 
@@ -195,7 +195,7 @@ The rules are enforced in `.dependency-cruiser.cjs`:
 | Complexity   | Biome `noExcessiveCognitiveComplexity` | cognitive complexity ≤ 15                                                                                                                                                                                |
 | Architecture | `dependency-cruiser`                   | the layering above                                                                                                                                                                                       |
 | Style        | Biome                                  | formatting and correctness linting                                                                                                                                                                       |
-| Tests        | `vitest`                               | 168 tests, including real `node:repl` integration                                                                                                                                                        |
+| Tests        | `vitest`                               | 193 tests, including real `node:repl` integration                                                                                                                                                        |
 
 Each gate has been verified to actually fail on a violation, not just to
 pass on good code.
@@ -214,6 +214,9 @@ Options:
   --base-url <url>    API base URL (default: $ANTHROPIC_BASE_URL or api.anthropic.com)
   --max-tokens <n>    max tokens per reply (default: 8192)
   --max-steps <n>     max REPL rounds per turn (default: 24)
+  --context-window <n>
+                      the model's context window in tokens, for the usage
+                      fraction in the status bar (default: known models only)
   --world <path>      where the agent keeps its model of the world
                       (default: .replagent/world.json in the working directory)
 ```
@@ -240,59 +243,101 @@ so it lands on the columns you are reading.
 A step that failed says so in red, even folded away: a transcript that
 hides the failure is a transcript that lies by omission.
 
+### The work is alive, the session is not
+
+Whether the agent is alive is answered by the line of the work itself, not
+by a clock somewhere else on the screen. The line starts spinning the
+moment the turn does, and it settles on the same row when the work is done:
+
+```
+⠹ replying · 1s
+⠹ Thought 1.2k chars · 4s
+● Thought 1.2k chars · 12s   · ctrl+o opens the thinking
+⠹ writing · 6s
+⠹ run vitest - see what breaks · 2s
+● run vitest - see what breaks · 2.3s   · ctrl+e opens the step
+```
+
+`⠹` is a life: it spins while the model reasons, while the reply is being
+written, and while the step runs. `●` is a receipt: it is what the line
+becomes when the work stops, together with how long it took. Nothing is
+added to the transcript at the end - the same row changes its marker, so a
+step costs one line whether it is running or finished.
+
+The step names itself while it runs: the REPL reports the name before the
+body executes, so the line can say `run vitest - see what breaks` while
+`vitest` is still going, instead of after it has finished. The keystroke
+hint is for a fold that has stopped moving, so it appears with `●`, not
+with `⠹`.
+
+Work that is cut off before it says anything - a thought interrupted
+mid-sentence, a reply that never completed - leaves nothing behind: there
+is no fold to open, so a receipt for words nobody can read is not worth
+the row. Work that did produce code stays, settled, so the transcript
+still says what ran.
+
+Notes about the run - a limit reached, a truncated reply, an unwrapped
+tool call - are written into the transcript as `note` lines. They are
+receipts, and a receipt outlives the turn that produced it.
+
 ### The reasoning
 
 A model that thinks before it answers produces that reasoning first, and
 the transcript keeps it first: it is its own fold, above the step, because
 that is the order it happened in - and the step's name was chosen inside
-it. Shut (the default), it reports only what it cost:
+it. Alive, it counts what has arrived (`⠹ Thought 1.2k chars · 4s`);
+settled, it reports what it cost:
 
 ```
-▶ Thought 1.2k chars · 12s   · ctrl+o opens the thinking
-▶ scan the failing test - run vitest and read the report   · ctrl+e opens the step
+● Thought 1.2k chars · 12s   · ctrl+o opens the thinking
+● scan the failing test - run vitest and read the report   · ctrl+e opens the step
 ```
 
 `ctrl+o` opens it, and the words are dim behind a dotted gutter - the ghost
 of the code, not the code. Reading the reasoning and reading the code are
 different things, so they are different keys. A reply with no reasoning
-adds no fold at all, and while the model is thinking the status bar says
-`thinking` in the place the current step will take.
+adds no fold at all.
 
 The reasoning is not part of the conversation sent back to the model: it
 is the human's window into how the step was chosen.
 
 ### The status bar
 
-The line pinned above the editor is the one thing that never scrolls away.
-On the left, who you are talking to. On the right, what the agent is doing
-and what it costs:
+The line under the editor is the one thing that never scrolls away. It is
+about the session, not the turn, so it does not move while the agent works:
 
 ```
-claude-sonnet-4-5 · api.anthropic.com    ⠋ step 7/24 · 45.2k in · 78% cached · 12s · 1.8k out · run vitest
+~/GitHub/replagent · ⎇ master · claude-sonnet-4-5          45.2k/200k · 78% cached
 ```
 
-- `step 7/24` is the budget: steps done against `--max-steps`. The count
-  turns yellow as the budget runs out.
-- `45.2k in` is what the last request carried - the whole conversation,
-  system prompt included, cache traffic counted too. That number is the
-  session's real budget: every step sends it again, and it only ever grows.
+- On the left, where you are and who you are talking to: the working
+  directory (read again as you go, so a `process.chdir` in a step shows
+  up), the git branch when the directory is in a repository - `⎇` a branch
+  name, or the short commit when HEAD is detached, read from `.git`
+  without spawning git - and the model. A gateway's host appears too; the
+  default endpoint does not, because you already know what it is.
+- `45.2k/200k` is what the last request carried against the model's context
+  window: the whole conversation, system prompt included, cache traffic
+  counted too. That number is the session's real budget: every step sends
+  it again, and it only ever grows. It turns yellow as the window fills.
+  When the window is not known the bar says `45.2k ctx` instead of
+  inventing a denominator; `--context-window` is there for models it does
+  not know.
 - `78% cached` is how much of it the API served from its prompt cache. It
   appears only when the endpoint reports cache accounting at all: an
   endpoint that never caches is not an endpoint with a zero percent hit
   rate.
-- `12s` and `1.8k out` are the age of the turn and its output so far.
-- The last item is the step the agent is on right now, so the run stays
-  readable while you are scrolled away from its newest output.
 
-The bar gives these up in ascending order of importance when the terminal
-is narrow: the step name first, then the output, the seconds, the cache
-rate, the token counts - the step counter is the last to leave, and the
-identity shortens before anything is lost entirely.
+On a narrow terminal the numbers are what the bar exists for, so the
+identity gives way first: the path loses its leading segments, then the
+model and the branch leave, and the cache rate goes before the weight.
+The directory - at least its last segment - is the last to leave, because
+where you are standing is the one fact that is on the screen nowhere else.
 
-When the agent is idle the right side keeps only what the conversation now
-weighs - `45.2k in · 78% cached` - so a glance between turns says where
-the session stands. Before the first request there is nothing to report,
-and the bar is just the identity.
+Before the first request there is nothing to report, and the bar is just
+the identity. The one thing that can take the bar over is the interrupt
+warning: `press ctrl+c again to quit` speaks about the session, which is
+exactly what the bar is for.
 
 ### Scrolling
 

@@ -10,6 +10,7 @@ import { runAgentTurn } from '../app/agent.js';
 import { SYSTEM_PROMPT } from '../app/prompt.js';
 import { Conversation } from '../domain/conversation.js';
 import { HELP, parseArgs } from './args.js';
+import { contextWindowFor } from './context-window.js';
 import { TurnQueue } from './turn-queue.js';
 
 async function main(): Promise<void> {
@@ -38,9 +39,11 @@ async function main(): Promise<void> {
 
   let currentController: AbortController | undefined;
 
+  const contextWindow = contextWindowFor(options.model, options.contextWindow);
   const ui = new PiTuiUi({
     model: options.model,
     endpoint: endpointLabel(client.baseURL),
+    ...(contextWindow !== undefined ? { contextWindow } : {}),
     formatter: new JsBeautifyFormatter(),
     highlighter: new JsHighlighter(),
     onInterrupt: () => {

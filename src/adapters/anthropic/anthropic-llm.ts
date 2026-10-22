@@ -69,31 +69,36 @@ export class AnthropicLlm implements LlmPort {
 /**
  * The usage of one stream, as the message envelope reports it.
  *
- * The start event fixes what the prompt weighed; the delta event adds the
- * final output count. The two travel on different schedules, and either
- * may never arrive.
+ * The counters are cumulative and travel on two events: `message_start`
+ * opens with the prompt, `message_delta` closes with the final totals. A
+ * gateway is free to put them on either - some send zeroes at the start and
+ * the real numbers with the stop reason - so both are folded, and the last
+ * value reported for each field wins.
  */
 class UsageTracker {
-  #usage: LlmUsage | undefined;
+  #input: number | undefined;
+  #cacheRead: number | undefined;
+  #cacheWrite: number | undefined;
+  #output: number | undefined;
   #reported = false;
 
   /** Fold one upstream event. A `done` comes back once the stream says why it stopped. */
   read(event: Anthropic.Messages.RawMessageStreamEvent): LlmStreamEvent | undefined {
     if (event.type === 'message_start') {
-      this.#usage = readUsage(event.message.usage);
+      this.#fold(event.message.usage);
       return undefined;
     }
-    if (event.type === 'message_delta' && event.delta.stop_reason !== null) {
+    if (event.type === 'message_delta') {
+      this.#fold(event.usage);
+      if (event.delta.stop_reason === null) {
+        return undefined;
+      }
       this.#reported = true;
-      // The delta carries the final output count; the input was fixed when
-      // the stream started.
-      const usage = this.#usage;
-      this.#usage =
-        usage === undefined ? undefined : { ...usage, output: event.usage.output_tokens };
+      const usage = this.#usage();
       return {
         type: 'done',
         stopReason: toStopReason(event.delta.stop_reason),
-        ...(this.#usage !== undefined ? { usage: this.#usage } : {}),
+        ...(usage !== undefined ? { usage } : {}),
       };
     }
     return undefined;
@@ -104,10 +109,55 @@ class UsageTracker {
     if (this.#reported) {
       return undefined;
     }
+    const usage = this.#usage();
     return {
       type: 'done',
       stopReason: 'other',
-      ...(this.#usage !== undefined ? { usage: this.#usage } : {}),
+      ...(usage !== undefined ? { usage } : {}),
+    };
+  }
+
+  /** Take what this event knows. A field it did not report leaves the old value alone. */
+  #fold(raw: RawUsage | null | undefined): void {
+    if (raw === null || raw === undefined) {
+      return;
+    }
+    if (typeof raw.input_tokens === 'number') {
+      this.#input = raw.input_tokens;
+    }
+    if (typeof raw.cache_read_input_tokens === 'number') {
+      this.#cacheRead = raw.cache_read_input_tokens;
+    }
+    if (typeof raw.cache_creation_input_tokens === 'number') {
+      this.#cacheWrite = raw.cache_creation_input_tokens;
+    }
+    if (typeof raw.output_tokens === 'number') {
+      this.#output = raw.output_tokens;
+    }
+  }
+
+  /**
+   * What the call cost, or nothing when the endpoint never accounted for
+   * the prompt. A run of zeroes is not a prompt of zero tokens: it is an
+   * endpoint that did not say, and the bar is better off silent than
+   * claiming an empty context.
+   */
+  #usage(): LlmUsage | undefined {
+    const cacheRead = this.#cacheRead ?? 0;
+    const cacheWrite = this.#cacheWrite ?? 0;
+    const input = (this.#input ?? 0) + cacheRead + cacheWrite;
+    if (input <= 0) {
+      return undefined;
+    }
+    // The input counts cache reads and writes too: those tokens are in the
+    // conversation whether they were billed at full price or not. Whether
+    // any cache accounting was reported is kept, so a gateway without
+    // caching is not reported as a gateway with a zero percent hit rate.
+    const cacheAccounted = this.#cacheRead !== undefined || this.#cacheWrite !== undefined;
+    return {
+      input,
+      output: this.#output ?? 0,
+      ...(cacheAccounted ? { cached: cacheRead } : {}),
     };
   }
 }
@@ -118,31 +168,6 @@ interface RawUsage {
   readonly output_tokens?: number | null;
   readonly cache_read_input_tokens?: number | null;
   readonly cache_creation_input_tokens?: number | null;
-}
-
-/**
- * Read the prompt's weight and how much of it was cache.
- *
- * The input counts cache reads and writes too: those tokens are in the
- * conversation whether they were billed at full price or not. Whether any
- * cache accounting was reported is kept, so a gateway without caching is
- * not reported as a gateway with a zero percent hit rate.
- */
-function readUsage(raw: RawUsage): LlmUsage {
-  const input = raw.input_tokens ?? 0;
-  const cacheRead = raw.cache_read_input_tokens ?? 0;
-  const cacheWrite = raw.cache_creation_input_tokens ?? 0;
-  const cacheReadReported =
-    raw.cache_read_input_tokens !== undefined && raw.cache_read_input_tokens !== null;
-  const cacheWriteReported =
-    raw.cache_creation_input_tokens !== undefined && raw.cache_creation_input_tokens !== null;
-  const cacheAccounted = cacheReadReported || cacheWriteReported;
-
-  return {
-    input: input + cacheRead + cacheWrite,
-    output: raw.output_tokens ?? 0,
-    ...(cacheAccounted ? { cached: cacheRead } : {}),
-  };
 }
 
 function toStopReason(reason: string): LlmStopReason {

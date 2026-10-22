@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { type AgentDeps, runAgentTurn } from '../src/app/agent.js';
 import { Conversation } from '../src/domain/conversation.js';
 import type { LlmPort, LlmRequest, LlmStreamEvent } from '../src/domain/ports/llm.js';
-import type { ReplObservation, ReplPort } from '../src/domain/ports/repl.js';
+import type { ReplObservation, ReplPort, ReplStep } from '../src/domain/ports/repl.js';
 import type { UiEvent, UiPort } from '../src/domain/ports/ui.js';
 
 class ScriptedLlm implements LlmPort {
@@ -52,10 +52,16 @@ class ScriptedRepl implements ReplPort {
     this.#observations = observations;
   }
 
-  async exec(code: string): Promise<ReplObservation> {
+  async exec(code: string, onStep?: (step: ReplStep) => void): Promise<ReplObservation> {
     this.executed.push(code);
-    const next = this.#observations[this.executed.length - 1];
-    return next ?? noopObservation;
+    const next = this.#observations[this.executed.length - 1] ?? noopObservation;
+    // The real REPL reports the step while the body is still running; the
+    // fake reports it before returning, which is early enough for the
+    // ordering the UI cares about.
+    if (next.step !== undefined) {
+      onStep?.(next.step);
+    }
+    return next;
   }
 }
 
@@ -167,6 +173,10 @@ describe('runAgentTurn', () => {
       name: 'add one',
       description: 'count up',
     });
+    // The name arrives while the code runs, so the transcript can say what
+    // is being done; the receipt that it finished comes after.
+    const kinds = ui.events.map((event) => event.type);
+    expect(kinds.indexOf('step')).toBeLessThan(kinds.indexOf('exec-done'));
   });
 
   it('gives up after the step limit', async () => {
@@ -324,7 +334,9 @@ describe('runAgentTurn', () => {
     const code = kinds.indexOf('agent-code');
 
     expect(ui.events).toContainEqual({ type: 'agent-thinking', text: 'the answer is in the file' });
-    expect(kinds).toContain('agent-thinking-delta');
+    // The delta carries how much has arrived, so the fold can count as the
+    // reasoning grows.
+    expect(ui.events).toContainEqual({ type: 'agent-thinking-delta', chars: 25 });
     expect(thinking).toBeGreaterThan(-1);
     expect(code).toBeGreaterThan(thinking);
   });
@@ -363,6 +375,23 @@ describe('runAgentTurn', () => {
 
     expect(ui.events.some((event) => event.type === 'agent-thinking')).toBe(false);
     expect(ui.events.some((event) => event.type === 'agent-thinking-delta')).toBe(false);
+  });
+
+  it('reports the end of the execution even when there is nothing to report', async () => {
+    const llm = new ScriptedLlm(['1;']);
+    const repl = new ScriptedRepl([{ ...noopObservation }]);
+    const ui = new RecordingUi();
+
+    await runAgentTurn(
+      deps(llm, repl, ui),
+      new Conversation(),
+      'do it',
+      new AbortController().signal,
+    );
+
+    // Without this the step's line would spin forever: an empty observation
+    // still means the code is done.
+    expect(ui.events.filter((event) => event.type === 'exec-done')).toHaveLength(1);
   });
 
   it('stops when the turn is cancelled', async () => {

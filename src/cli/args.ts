@@ -3,6 +3,8 @@ export interface CliOptions {
   readonly baseUrl: string | undefined;
   readonly maxTokens: number;
   readonly maxSteps: number;
+  /** The model's context window, when the human knows it and we do not. */
+  readonly contextWindow: number | undefined;
   /** Where the agent's model of the world is kept. */
   readonly world: string;
   readonly help: boolean;
@@ -28,6 +30,9 @@ Options:
   --base-url <url>    API base URL (default: $ANTHROPIC_BASE_URL or api.anthropic.com)
   --max-tokens <n>    max tokens per reply (default: ${DEFAULT_MAX_TOKENS})
   --max-steps <n>     max REPL rounds per turn (default: ${DEFAULT_MAX_STEPS})
+  --context-window <n>
+                      the model's context window in tokens, for the usage
+                      fraction in the status bar (default: known models only)
   --world <path>      where the agent keeps its model of the world
                       (default: ${DEFAULT_WORLD_PATH} in the working directory)
   -h, --help          show this help
@@ -59,6 +64,7 @@ export function parseArgs(
     baseUrl: flags.baseUrl ?? env['ANTHROPIC_BASE_URL'],
     maxTokens: flags.maxTokens ?? DEFAULT_MAX_TOKENS,
     maxSteps: flags.maxSteps ?? DEFAULT_MAX_STEPS,
+    contextWindow: flags.contextWindow,
     world: flags.world ?? DEFAULT_WORLD_PATH,
     help: flags.help,
   };
@@ -69,9 +75,17 @@ interface Flags {
   baseUrl: string | undefined;
   maxTokens: number | undefined;
   maxSteps: number | undefined;
+  contextWindow: number | undefined;
   world: string | undefined;
   help: boolean;
 }
+
+/** The numeric flags, and the option each one fills in. */
+const NUMBER_FLAGS: Readonly<Record<string, 'maxTokens' | 'maxSteps' | 'contextWindow'>> = {
+  '--max-tokens': 'maxTokens',
+  '--max-steps': 'maxSteps',
+  '--context-window': 'contextWindow',
+};
 
 function parseFlags(argv: readonly string[]): Flags {
   const flags: Flags = {
@@ -79,6 +93,7 @@ function parseFlags(argv: readonly string[]): Flags {
     baseUrl: undefined,
     maxTokens: undefined,
     maxSteps: undefined,
+    contextWindow: undefined,
     world: undefined,
     help: false,
   };
@@ -86,6 +101,12 @@ function parseFlags(argv: readonly string[]): Flags {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === undefined) {
+      continue;
+    }
+    const numberFlag = NUMBER_FLAGS[arg];
+    if (numberFlag !== undefined) {
+      flags[numberFlag] = readNumber(argv, index, arg);
+      index += 1;
       continue;
     }
     switch (arg) {
@@ -99,14 +120,6 @@ function parseFlags(argv: readonly string[]): Flags {
         break;
       case '--base-url':
         flags.baseUrl = readValue(argv, index, '--base-url');
-        index += 1;
-        break;
-      case '--max-tokens':
-        flags.maxTokens = readNumber(argv, index, '--max-tokens');
-        index += 1;
-        break;
-      case '--max-steps':
-        flags.maxSteps = readNumber(argv, index, '--max-steps');
         index += 1;
         break;
       case '--world':

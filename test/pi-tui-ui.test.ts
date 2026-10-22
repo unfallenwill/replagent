@@ -2,6 +2,7 @@ import type { ProgramStatus, Terminal } from '@earendil-works/pi-tui';
 import { describe, expect, it } from 'vitest';
 import { JsHighlighter } from '../src/adapters/format/js-highlight.js';
 import { PiTuiUi } from '../src/adapters/tui/pi-tui-ui.js';
+import type { Location } from '../src/adapters/workspace/location.js';
 
 class FakeTerminal implements Terminal {
   output = '';
@@ -85,10 +86,13 @@ function tick(ms = 60): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** A stand-in for the working directory, so the bar is the same everywhere. */
+const atRepository: () => Location = () => ({ path: '~/GitHub/replagent', branch: 'master' });
+
 describe('PiTuiUi', () => {
   it('renders the transcript, not just the editor', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
 
     void ui.run();
     await tick();
@@ -109,7 +113,7 @@ describe('PiTuiUi', () => {
 
   it('folds the code away and shows only the name and the description', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
 
     void ui.run();
     await tick();
@@ -126,15 +130,22 @@ describe('PiTuiUi', () => {
     ui.stop();
   });
 
-  it('keeps the keystroke hint at the tail of the fold', async () => {
+  it('keeps the keystroke hint at the tail of the fold, once the step has settled', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
 
     void ui.run();
     await tick();
 
     ui.emit({ type: 'agent-code', text: 'const a = 1;' });
     ui.emit({ type: 'step', name: 'look around', description: 'see what is here' });
+    // While the step runs the line says what is happening; the hint is for
+    // a fold that has stopped moving.
+    expect(
+      ui.transcriptText.split('\n').find((line) => line.includes('look around')),
+    ).not.toContain('ctrl+e');
+
+    ui.emit({ type: 'exec-done' });
     await tick();
 
     // The affordance lives where the fold is, not down on the status line.
@@ -150,9 +161,37 @@ describe('PiTuiUi', () => {
     ui.stop();
   });
 
+  it('settles the step on the same line, and says how long it took', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
+
+    void ui.run();
+    await tick();
+
+    ui.emit({ type: 'busy', busy: true });
+    ui.emit({ type: 'agent-code-delta', text: 'await step(' });
+    ui.emit({ type: 'agent-code', text: 'const a = 1;' });
+    ui.emit({ type: 'step', name: 'look around', description: 'see what is here' });
+    await tick();
+
+    const running = ui.transcriptText.split('\n').filter((line) => line.includes('look around'));
+    expect(running).toHaveLength(1);
+    // The marker only settles when the work does.
+    expect(running[0]).not.toContain('●');
+
+    ui.emit({ type: 'exec-done' });
+    await tick();
+
+    const settled = ui.transcriptText.split('\n').filter((line) => line.includes('look around'));
+    expect(settled).toHaveLength(1);
+    expect(settled[0]).toContain('●');
+
+    ui.stop();
+  });
+
   it('takes the hint back when the step is no longer the newest', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
 
     void ui.run();
     await tick();
@@ -160,8 +199,10 @@ describe('PiTuiUi', () => {
     ui.emit({ type: 'busy', busy: true });
     ui.emit({ type: 'agent-code', text: 'const a = 1;' });
     ui.emit({ type: 'step', name: 'first step', description: 'do the first thing' });
+    ui.emit({ type: 'exec-done' });
     ui.emit({ type: 'agent-code', text: 'const b = 2;' });
     ui.emit({ type: 'step', name: 'second step', description: 'do the second thing' });
+    ui.emit({ type: 'exec-done' });
     await tick();
 
     const lines = ui.transcriptText.split('\n');
@@ -185,13 +226,13 @@ describe('PiTuiUi', () => {
 
   it('folds the reasoning above the step, reporting only what it cost', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
 
     void ui.run();
     await tick();
 
     ui.emit({ type: 'busy', busy: true });
-    ui.emit({ type: 'agent-thinking-delta' });
+    ui.emit({ type: 'agent-thinking-delta', chars: 42 });
     ui.emit({ type: 'agent-thinking', text: 'The snapshot expects the old module count.' });
     ui.emit({ type: 'agent-code', text: 'const a = 1;' });
     ui.emit({ type: 'step', name: 'look around', description: 'see what is here' });
@@ -213,15 +254,36 @@ describe('PiTuiUi', () => {
     ui.stop();
   });
 
-  it('shows the reasoning when it is asked for', async () => {
+  it('counts the reasoning while it is still arriving', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
 
     void ui.run();
     await tick();
 
     ui.emit({ type: 'busy', busy: true });
-    ui.emit({ type: 'agent-thinking-delta' });
+    ui.emit({ type: 'agent-thinking-delta', chars: 1200 });
+    await tick();
+
+    const live = ui.transcriptText.split('\n').find((line) => line.includes('Thought'));
+    expect(live).toContain('1.2k chars');
+    // It is alive, so it is not reporting a duration yet in the settled
+    // form, and it has no hint to offer.
+    expect(live).not.toContain('●');
+    expect(live).not.toContain('ctrl+o');
+
+    ui.stop();
+  });
+
+  it('shows the reasoning when it is asked for', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
+
+    void ui.run();
+    await tick();
+
+    ui.emit({ type: 'busy', busy: true });
+    ui.emit({ type: 'agent-thinking-delta', chars: 42 });
     ui.emit({ type: 'agent-thinking', text: 'The snapshot expects the old module count.' });
     ui.emit({ type: 'agent-code', text: 'const a = 1;' });
     ui.emit({ type: 'step', name: 'look around', description: 'see what is here' });
@@ -241,16 +303,17 @@ describe('PiTuiUi', () => {
 
   it('takes the thinking hint back when a newer thought arrives', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
 
     void ui.run();
     await tick();
 
     ui.emit({ type: 'busy', busy: true });
-    ui.emit({ type: 'agent-thinking-delta' });
+    ui.emit({ type: 'agent-thinking-delta', chars: 12 });
     ui.emit({ type: 'agent-thinking', text: 'first thought' });
     ui.emit({ type: 'agent-code', text: 'const a = 1;' });
-    ui.emit({ type: 'agent-thinking-delta' });
+    ui.emit({ type: 'exec-done' });
+    ui.emit({ type: 'agent-thinking-delta', chars: 13 });
     ui.emit({ type: 'agent-thinking', text: 'second thought' });
     ui.emit({ type: 'agent-code', text: 'const b = 2;' });
     await tick();
@@ -264,29 +327,53 @@ describe('PiTuiUi', () => {
     ui.stop();
   });
 
-  it('says the model is thinking before it writes anything', async () => {
+  it('puts the work in the transcript, not in the bar', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
 
     void ui.run();
     await tick();
 
     ui.emit({ type: 'busy', busy: true });
     ui.emit({ type: 'turn-progress', steps: 1, maxSteps: 24 });
-    ui.emit({ type: 'agent-thinking-delta' });
 
-    expect(plain(ui.statusBarText)).toContain('thinking');
+    expect(ui.transcriptText).toContain('replying');
+    expect(plain(ui.statusBarText)).not.toContain('replying');
 
-    // Once the code arrives, the bar is about the step again.
+    ui.emit({ type: 'agent-thinking-delta', chars: 0 });
+    expect(ui.transcriptText).not.toContain('replying');
+    expect(ui.transcriptText).toContain('Thought');
+
+    // Once the code arrives, the line is about the step again.
     ui.emit({ type: 'agent-code-delta', text: 'const a' });
-    expect(plain(ui.statusBarText)).not.toContain('thinking');
+    expect(ui.transcriptText).toContain('writing');
+
+    ui.stop();
+  });
+
+  it('does not move the bar while the agent works', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
+
+    void ui.run();
+    await tick();
+
+    ui.emit({ type: 'busy', busy: true });
+    ui.emit({ type: 'agent-code-delta', text: 'await step(' });
+    const before = ui.statusBarText;
+
+    await tick(150);
+
+    // The clocks are on the work. The bar is a statement, and a statement
+    // does not tick.
+    expect(ui.statusBarText).toBe(before);
 
     ui.stop();
   });
 
   it('shows the code when the step is asked for', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
 
     void ui.run();
     await tick();
@@ -310,6 +397,7 @@ describe('PiTuiUi', () => {
     const ui = new PiTuiUi({
       model: 'test-model',
       terminal,
+      location: atRepository,
       highlighter: new JsHighlighter(),
     });
 
@@ -330,13 +418,14 @@ describe('PiTuiUi', () => {
 
   it('shows the code below its step, not at the end of the transcript', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
 
     void ui.run();
     await tick();
 
     ui.emit({ type: 'agent-code', text: 'const secret = "hidden";' });
     ui.emit({ type: 'step', name: 'look around', description: 'see what is here' });
+    ui.emit({ type: 'exec-done' });
     ui.emit({ type: 'final', text: 'the answer' });
     await tick();
 
@@ -359,7 +448,7 @@ describe('PiTuiUi', () => {
 
   it('leaves the transcript on the screen when it stops', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
 
     void ui.run();
     await tick();
@@ -367,6 +456,7 @@ describe('PiTuiUi', () => {
     ui.emit({ type: 'user-message', text: '你好' });
     ui.emit({ type: 'agent-code', text: 'const a = 1;' });
     ui.emit({ type: 'step', name: '打个招呼', description: '向用户问好' });
+    ui.emit({ type: 'exec-done' });
     ui.emit({ type: 'final', text: '你好！' });
     await tick();
 
@@ -382,181 +472,214 @@ describe('PiTuiUi', () => {
     ui.stop();
   });
 
-  it('shows the activity in the status bar while the agent is working', async () => {
+  it('says where the session is standing', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
 
     void ui.run();
     await tick();
 
-    ui.emit({ type: 'busy', busy: true });
-    ui.emit({ type: 'turn-progress', steps: 0, maxSteps: 24 });
+    expect(plain(ui.statusBarText)).toContain('~/GitHub/replagent · ⎇ master · test-model');
 
-    // Read straight away, before the spinner has turned: the first frame,
-    // the counter and the fresh age of the turn are all on the bar.
+    ui.stop();
+  });
+
+  it('leaves the branch out when the directory is not a repository', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({
+      model: 'test-model',
+      terminal,
+      location: () => ({ path: '~/scratch', branch: undefined }),
+    });
+
+    void ui.run();
+    await tick();
+
     const bar = plain(ui.statusBarText);
-    expect(bar).toContain('⠋');
-    expect(bar).toContain('step 0/24');
-    expect(bar).toContain('0s');
-
-    ui.emit({ type: 'busy', busy: false });
-    ui.stop();
-  });
-
-  it('keeps the model and the endpoint pinned in the status bar', async () => {
-    const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', endpoint: 'gw.example.com', terminal });
-
-    void ui.run();
-    await tick();
-
-    expect(plain(ui.statusBarText)).toContain('test-model · gw.example.com');
+    expect(bar).toContain('~/scratch · test-model');
+    expect(bar).not.toContain('⎇');
 
     ui.stop();
   });
 
-  it('counts the steps as the turn spends its budget', async () => {
+  it('shows the endpoint only when it is not the default one', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const gateway = new PiTuiUi({
+      model: 'test-model',
+      endpoint: 'gw.example.com',
+      terminal,
+      location: atRepository,
+    });
 
-    void ui.run();
-    await tick();
+    expect(plain(gateway.statusBarText)).toContain('test-model · gw.example.com');
+    gateway.stop();
 
-    ui.emit({ type: 'busy', busy: true });
-    ui.emit({ type: 'turn-progress', steps: 3, maxSteps: 24 });
-    await tick();
+    const direct = new PiTuiUi({
+      model: 'test-model',
+      endpoint: 'api.anthropic.com',
+      terminal,
+      location: atRepository,
+    });
 
-    expect(plain(ui.statusBarText)).toContain('step 3/24');
-
-    ui.stop();
+    expect(plain(direct.statusBarText)).not.toContain('api.anthropic.com');
+    direct.stop();
   });
 
-  it('shows what the last request cost, cache rate included', async () => {
+  it('shows what the conversation weighs, against the window it fits in', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({
+      model: 'test-model',
+      terminal,
+      location: atRepository,
+      contextWindow: 200_000,
+    });
 
     void ui.run();
     await tick();
 
-    ui.emit({ type: 'busy', busy: true });
-    ui.emit({ type: 'turn-progress', steps: 7, maxSteps: 24 });
     ui.emit({ type: 'turn-usage', usage: { input: 45234, output: 1800, cached: 35280 } });
     await tick();
 
     const bar = plain(ui.statusBarText);
-    expect(bar).toContain('45.2k in');
+    expect(bar).toContain('45.2k/200k');
     expect(bar).toContain('78% cached');
-    expect(bar).toContain('1.8k out');
-
-    ui.stop();
-  });
-
-  it('keeps the context line when the turn is over', async () => {
-    const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
-
-    void ui.run();
-    await tick();
-
-    ui.emit({ type: 'busy', busy: true });
-    ui.emit({ type: 'turn-usage', usage: { input: 45234, output: 1800, cached: 35280 } });
-    ui.emit({ type: 'busy', busy: false });
-    await tick();
-
-    const bar = plain(ui.statusBarText);
-    expect(bar).toContain('45.2k in');
-    expect(bar).toContain('78% cached');
-    // The turn is over: its output count and its age are not facts any more.
+    // The turn is over, and its output count is not a session fact.
     expect(bar).not.toContain('out');
     expect(bar).not.toContain('step ');
 
     ui.stop();
   });
 
-  it('reports no cache rate when the API reports no cache accounting', async () => {
+  it('reports the weight alone when the window is not known', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
 
     void ui.run();
     await tick();
 
-    ui.emit({ type: 'busy', busy: true });
+    ui.emit({ type: 'turn-usage', usage: { input: 45234, output: 1800, cached: 35280 } });
+    await tick();
+
+    // A wrong denominator is worse than no denominator.
+    expect(plain(ui.statusBarText)).toContain('45.2k ctx');
+    expect(plain(ui.statusBarText)).not.toContain('/200k');
+
+    ui.stop();
+  });
+
+  it('reports no cache rate when the API reports no cache accounting', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({
+      model: 'test-model',
+      terminal,
+      location: atRepository,
+      contextWindow: 200_000,
+    });
+
+    void ui.run();
+    await tick();
+
     ui.emit({ type: 'turn-usage', usage: { input: 1000, output: 50 } });
     await tick();
 
     const bar = plain(ui.statusBarText);
-    expect(bar).toContain('1k in');
+    expect(bar).toContain('1k/200k');
     expect(bar).not.toContain('cached');
 
     ui.stop();
   });
 
-  it('shows the step the agent is on, and forgets it when the next reply starts', async () => {
+  it('marks the context when the window is running out', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({
+      model: 'test-model',
+      terminal,
+      location: atRepository,
+      contextWindow: 200_000,
+    });
 
     void ui.run();
     await tick();
 
-    ui.emit({ type: 'busy', busy: true });
-    ui.emit({ type: 'turn-progress', steps: 1, maxSteps: 24 });
-    ui.emit({ type: 'agent-code', text: 'const a = 1;' });
-    ui.emit({ type: 'step', name: 'look around', description: 'see what is here' });
+    ui.emit({ type: 'turn-usage', usage: { input: 190_000, output: 100 } });
     await tick();
 
-    expect(plain(ui.statusBarText)).toContain('look around');
-
-    // The next reply has no name yet: the old one must not pose as it.
-    ui.emit({ type: 'agent-code-delta', text: 'const b = 2;' });
-    expect(plain(ui.statusBarText)).not.toContain('look around');
+    expect(ui.statusBarText).toContain('\u001b[33m190k/200k\u001b[0m');
 
     ui.stop();
   });
 
-  it('marks the counter when the budget is running out', async () => {
+  it('writes the step budget as a note when it starts running out', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
 
     void ui.run();
     await tick();
 
     ui.emit({ type: 'busy', busy: true });
-    ui.emit({ type: 'turn-progress', steps: 4, maxSteps: 4 });
+    ui.emit({ type: 'turn-progress', steps: 21, maxSteps: 24 });
+    ui.emit({ type: 'turn-progress', steps: 22, maxSteps: 24 });
     await tick();
 
-    expect(ui.statusBarText).toContain('\u001b[33mstep 4/4\u001b[0m');
+    // Said once: a warning repeated every step is a warning nobody reads.
+    const notes = ui.transcriptText.match(/21 of 24 steps used\./g) ?? [];
+    expect(notes).toHaveLength(1);
+    // The budget is a fact about the turn, and the turn's facts are in the
+    // transcript; the bar keeps to the session.
+    expect(plain(ui.statusBarText)).not.toContain('step');
+
+    ui.stop();
+  });
+
+  it('keeps the status messages in the transcript', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
+
+    void ui.run();
+    await tick();
+
+    ui.emit({ type: 'status', text: 'Stopped: reached the limit of 4 steps.' });
+    await tick();
+
+    // A receipt outlives the turn that produced it.
+    expect(ui.transcriptText).toContain('note');
+    expect(ui.transcriptText).toContain('Stopped: reached the limit of 4 steps.');
+    expect(plain(ui.statusBarText)).not.toContain('Stopped');
 
     ui.stop();
   });
 
   it('gives up the bar items in ascending order of importance on a narrow terminal', async () => {
     const terminal = new FakeTerminal();
-    terminal.columnCount = 48;
-    const ui = new PiTuiUi({ model: 'test-model', endpoint: 'gw.example.com', terminal });
+    terminal.columnCount = 30;
+    const ui = new PiTuiUi({
+      model: 'test-model',
+      terminal,
+      location: atRepository,
+      contextWindow: 200_000,
+    });
 
     void ui.run();
     await tick();
 
-    ui.emit({ type: 'busy', busy: true });
-    ui.emit({ type: 'turn-progress', steps: 1, maxSteps: 24 });
     ui.emit({ type: 'turn-usage', usage: { input: 45234, output: 1800, cached: 35280 } });
-    ui.emit({ type: 'agent-code', text: 'const a = 1;' });
-    ui.emit({ type: 'step', name: 'a very long step name', description: 'for the bar to drop' });
     await tick();
 
     const bar = plain(ui.statusBarText);
-    // The counter is the last to leave.
-    expect(bar).toContain('step 1/24');
-    expect(bar).not.toContain('a very long step name');
-    expect(bar).not.toContain('out');
+    // The weight is the last to leave; the identity gives up its parts
+    // before the numbers do.
+    expect(bar).toContain('45.2k/200k');
     expect(bar).not.toContain('cached');
+    expect(bar).not.toContain('test-model');
+    expect(bar).not.toContain('⎇');
+    expect(bar).toContain('…/replagent');
 
     ui.stop();
   });
 
   it('turns a submitted line into an input event', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
     let received: string | undefined;
     ui.onInput((text) => {
       received = text;
@@ -577,7 +700,7 @@ describe('PiTuiUi', () => {
 
   it('gives every turn its own code block', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
 
     void ui.run();
     await tick();
@@ -585,6 +708,7 @@ describe('PiTuiUi', () => {
     ui.emit({ type: 'busy', busy: true });
     ui.emit({ type: 'agent-code', text: 'finish("first")' });
     ui.emit({ type: 'step', name: 'first step', description: 'end the first turn' });
+    ui.emit({ type: 'exec-done' });
     ui.emit({ type: 'busy', busy: false });
     ui.emit({ type: 'busy', busy: true });
     ui.emit({ type: 'agent-code', text: 'finish("second")' });
@@ -603,7 +727,7 @@ describe('PiTuiUi', () => {
 
   it('keeps the steps in the order they happened', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
 
     void ui.run();
     await tick();
@@ -634,7 +758,7 @@ describe('PiTuiUi', () => {
 
   it('folds the logs and the value into the step', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
 
     void ui.run();
     await tick();
@@ -643,6 +767,7 @@ describe('PiTuiUi', () => {
     ui.emit({ type: 'step', name: 'a step', description: 'do the thing' });
     ui.emit({ type: 'repl-log', text: 'a log line' });
     ui.emit({ type: 'repl-value', text: '42' });
+    ui.emit({ type: 'exec-done' });
     await tick();
 
     const collapsed = plain(terminal.output);
@@ -662,7 +787,7 @@ describe('PiTuiUi', () => {
 
   it('puts the code of the next turn below the error of the previous one', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
 
     void ui.run();
     await tick();
@@ -671,7 +796,10 @@ describe('PiTuiUi', () => {
     // rejected and no code event is emitted for it.
     ui.emit({ type: 'busy', busy: true });
     ui.emit({ type: 'agent-code-delta', text: '<tool_call>{"name": "fetch"}</tool_call>' });
+    ui.emit({ type: 'agent-code', text: '<tool_call>{"name": "fetch"}</tool_call>' });
     ui.emit({ type: 'repl-error', text: 'You emitted a tool call.' });
+    terminal.onInput?.('\x05');
+    await tick();
     ui.emit({ type: 'busy', busy: false });
 
     // turn 2: the model writes code again.
@@ -693,12 +821,55 @@ describe('PiTuiUi', () => {
     ui.stop();
   });
 
+  it('leaves nothing behind for work that was cut off before it said anything', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
+
+    void ui.run();
+    await tick();
+
+    ui.emit({ type: 'busy', busy: true });
+    ui.emit({ type: 'agent-thinking-delta', chars: 400 });
+    expect(ui.transcriptText).toContain('Thought 400 chars');
+
+    // The turn was interrupted mid-thought: there is no reasoning to open,
+    // so a receipt for words nobody can read is not worth the row.
+    ui.emit({ type: 'busy', busy: false });
+    await tick();
+
+    expect(ui.transcriptText).not.toContain('Thought');
+
+    ui.stop();
+  });
+
+  it('keeps a step that ran when the turn is interrupted afterwards', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
+
+    void ui.run();
+    await tick();
+
+    ui.emit({ type: 'busy', busy: true });
+    ui.emit({ type: 'agent-code-delta', text: 'await step(' });
+    ui.emit({ type: 'agent-code', text: 'const a = 1;' });
+    await tick();
+
+    // The code exists, so the transcript still says what was run.
+    ui.emit({ type: 'busy', busy: false });
+    await tick();
+
+    expect(plain(ui.transcriptText)).toContain('● js');
+
+    ui.stop();
+  });
+
   it('interrupts on the first ctrl+c and quits on the second', async () => {
     const terminal = new FakeTerminal();
     let interrupts = 0;
     const ui = new PiTuiUi({
       model: 'test-model',
       terminal,
+      location: atRepository,
       onInterrupt: () => {
         interrupts += 1;
       },
@@ -707,11 +878,15 @@ describe('PiTuiUi', () => {
     const running = ui.run();
     await tick();
 
+    ui.emit({ type: 'turn-usage', usage: { input: 45234, output: 1800, cached: 35280 } });
+
     terminal.onInput?.('\x03');
     await tick();
 
     expect(interrupts).toBe(1);
     expect(plain(terminal.output)).toContain('press ctrl+c again to quit');
+    // The warning is about the session, so it takes the bar, numbers and all.
+    expect(plain(ui.statusBarText)).not.toContain('cached');
 
     terminal.onInput?.('\x03');
     await expect(running).resolves.toBeUndefined();
@@ -719,7 +894,7 @@ describe('PiTuiUi', () => {
 
   it('scrolls the transcript with the mouse wheel', async () => {
     const terminal = new FakeTerminal();
-    const ui = new PiTuiUi({ model: 'test-model', terminal });
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
 
     void ui.run();
     await tick();

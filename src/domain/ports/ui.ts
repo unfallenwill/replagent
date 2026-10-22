@@ -19,10 +19,19 @@ export type UiEvent =
    * because that is the order it happened in.
    */
   | { readonly type: 'agent-thinking'; readonly text: string }
-  /** A chunk of the reasoning, as it is being written. */
-  | { readonly type: 'agent-thinking-delta' }
+  /**
+   * A chunk of the reasoning, as it is being written. `chars` is how much
+   * of it has arrived so far: the fold reports its size while it is still
+   * being written.
+   */
+  | { readonly type: 'agent-thinking-delta'; readonly chars: number }
   /** The step that ran: the name the agent gave it and what it was for. */
   | { readonly type: 'step'; readonly name: string; readonly description: string }
+  /**
+   * The code finished running. Emitted even when the observation says
+   * nothing, so the step's line can settle instead of spinning forever.
+   */
+  | { readonly type: 'exec-done' }
   /** A line the agent's code logged. */
   | { readonly type: 'repl-log'; readonly text: string }
   /** The value the agent's step returned. */

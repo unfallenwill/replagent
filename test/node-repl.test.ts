@@ -153,6 +153,18 @@ describe('NodeReplSession', () => {
     expect(observation.step).toEqual({ name: 'count the modules', description: 'read src' });
   });
 
+  it('reports the step as it is named, before the body is done', async () => {
+    const repl = session();
+    const reported: string[] = [];
+    const observation = await repl.exec(
+      'await step("look around", "see what is here", async () => { await new Promise((r) => setTimeout(r, 10)); return 1; })',
+      (step) => reported.push(`${step.name} - ${step.description}`),
+    );
+
+    expect(observation.ok).toBe(true);
+    expect(reported).toEqual(['look around - see what is here']);
+  });
+
   it('keeps the step in the world model before the body runs', async () => {
     const repl = session();
     await repl.exec('await step("look around", "see what is here", async () => 1)');

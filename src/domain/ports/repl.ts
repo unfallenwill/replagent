@@ -32,5 +32,12 @@ export interface ReplStep {
 }
 
 export interface ReplPort {
-  exec(code: string): Promise<ReplObservation>;
+  /**
+   * Run the code and report what happened.
+   *
+   * `onStep` is called the moment the code names its step, which is before
+   * the step's body runs: the observer learns what is being done while it
+   * is being done, not after.
+   */
+  exec(code: string, onStep?: (step: ReplStep) => void): Promise<ReplObservation>;
 }

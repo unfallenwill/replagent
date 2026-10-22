@@ -159,6 +159,7 @@ export class NodeReplSession implements ReplPort {
   #finalAnswer: string | undefined;
   #execToken = 0;
   #onUncaught: ((text: string) => void) | undefined;
+  #onStep: ((step: ReplStep) => void) | undefined;
   #step: ReplStep | undefined;
 
   constructor(options: NodeReplOptions) {
@@ -187,15 +188,18 @@ export class NodeReplSession implements ReplPort {
     this.#tapUncaught(output);
   }
 
-  async exec(code: string): Promise<ReplObservation> {
+  async exec(code: string, onStep?: (step: ReplStep) => void): Promise<ReplObservation> {
     this.#execToken += 1;
     const token = this.#execToken;
     this.#logs.length = 0;
     this.#finalAnswer = undefined;
     this.#step = undefined;
+    this.#onStep = onStep;
     this.#installFinish(token);
 
     const outcome = await this.#evaluate(code);
+    // A step named by code that outlived its evaluation belongs to nobody.
+    this.#onStep = undefined;
     const logs = trimLogs([...this.#logs]);
     const step = this.#step;
 
@@ -402,6 +406,9 @@ export class NodeReplSession implements ReplPort {
 
       const step: ReplStep = { name, description };
       this.#step = step;
+      // The observer hears the name before the body runs: that is the whole
+      // point of naming the step first.
+      this.#onStep?.(step);
       this.#keep(setPlan(this.#worldState, { name, description }));
 
       return await (body as StepBody)(name, description);

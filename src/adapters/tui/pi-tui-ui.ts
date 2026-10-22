@@ -1,3 +1,4 @@
+import process from 'node:process';
 import {
   type Component,
   Container,
@@ -18,6 +19,7 @@ import type { CodeFormatter, CodeHighlighter } from '../../domain/ports/format.j
 import type { LlmUsage } from '../../domain/ports/llm.js';
 import type { UiEvent, UiPort } from '../../domain/ports/ui.js';
 import { bold, cyan, dim, green, red, yellow } from '../format/ansi.js';
+import { elidePath, type Location, readLocation } from '../workspace/location.js';
 
 const selectListTheme: SelectListTheme = {
   selectedPrefix: (text) => `> ${text}`,
@@ -37,18 +39,26 @@ const SPINNER_INTERVAL_MS = 80;
 const QUIT_CONFIRM_MS = 2000;
 
 /**
- * How much of the step budget may be spent before the counter changes
- * colour. The number itself is the report; the colour only says that the
- * end of the budget is close.
+ * The endpoint you get by saying nothing. Only an endpoint that is not this
+ * one is worth a place in the bar.
+ */
+const DEFAULT_ENDPOINT = 'api.anthropic.com';
+
+/**
+ * How much of the step budget may be spent before the transcript says so.
+ * The note is a receipt, not a countdown: it appears once.
  */
 const NEAR_LIMIT = 0.85;
 
+/** How full the context window may get before the number changes colour. */
+const NEAR_CONTEXT = 0.8;
+
 /** Between the two halves of the status bar. */
 const BAR_SEPARATOR = dim(' · ');
-/** The narrowest the identity may be truncated to before it gives way entirely. */
-const MIN_IDENTITY = 8;
 /** The smallest gap the two halves of the bar may keep between them. */
 const MIN_GAP = 2;
+/** How often the directory and the branch are read again, in milliseconds. */
+const LOCATION_REFRESH_MS = 1000;
 
 /**
  * The reasoning, as the terminal reads it.
@@ -89,14 +99,6 @@ function cacheRate(usage: LlmUsage): number | undefined {
   return Math.round((100 * usage.cached) / usage.input);
 }
 
-/** How long the current turn has been running: `42s`, then `3m07s`. */
-function formatElapsed(startedAt: number | undefined): string {
-  if (startedAt === undefined) {
-    return '';
-  }
-  return formatSeconds(Date.now() - startedAt);
-}
-
 /** A duration in milliseconds, as a person reads it: `7s`, then `3m07s`. */
 function formatSeconds(duration: number): string {
   const seconds = Math.floor(duration / 1000);
@@ -106,12 +108,25 @@ function formatSeconds(duration: number): string {
   return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`;
 }
 
+/** The working directory as it is now, or a placeholder that cannot throw. */
+function defaultLocation(): Location {
+  try {
+    return readLocation(process.cwd());
+  } catch {
+    return { path: '.', branch: undefined };
+  }
+}
+
 export interface PiTuiOptions {
   readonly model: string;
   /** Terminal to render on. Defaults to the process terminal. */
   readonly terminal?: Terminal;
-  /** Host the agent talks to, shown in the header. */
+  /** Host the agent talks to, shown in the bar when it is not the default. */
   readonly endpoint?: string;
+  /** The model's context window in tokens, for the context fraction. */
+  readonly contextWindow?: number;
+  /** Where the agent is standing. Read afresh as the bar updates. */
+  readonly location?: () => Location;
   /** Capture mouse events so the wheel scrolls the transcript. Default: true. */
   readonly mouse?: boolean;
   /** Called when the user interrupts the running turn with the first ctrl+c. */
@@ -120,6 +135,52 @@ export interface PiTuiOptions {
   readonly formatter?: CodeFormatter;
   /** Colours the agent's code for display. */
   readonly highlighter?: CodeHighlighter;
+}
+
+/**
+ * A step in the transcript.
+ *
+ * The human sees the title: the name the agent gave the step and what it
+ * was for. Everything the step produced - the code, the logs, the value -
+ * belongs to it, and opens and closes with it.
+ *
+ * The step is alive while it runs: the marker spins, the seconds move, and
+ * the name arrives the moment the code names it. When the code is done the
+ * line settles on the same row, so a step costs one line whether it is
+ * running or finished.
+ */
+interface StepBlock {
+  readonly header: Text;
+  /** The code, once the reply is complete. Absent while it is being written. */
+  code: Text | undefined;
+  readonly group: Container;
+  readonly details: Text[];
+  /** `name - description`, once the code has said what the step is. */
+  label: string | undefined;
+  phase: 'writing' | 'running';
+  expanded: boolean;
+  failed: boolean;
+  live: boolean;
+  readonly startedAt: number;
+  elapsed: number | undefined;
+}
+
+/**
+ * The reasoning that came before a reply.
+ *
+ * It is its own fold, above the step, because that is the order it happened
+ * in - and the step's name was chosen inside it. Alive, it counts what has
+ * arrived so far; settled, it reports what it cost: how much and how long.
+ */
+interface ThoughtBlock {
+  readonly header: Text;
+  body: Text | undefined;
+  readonly group: Container;
+  expanded: boolean;
+  live: boolean;
+  readonly startedAt: number;
+  chars: number;
+  elapsed: number | undefined;
 }
 
 /**
@@ -133,74 +194,41 @@ export interface PiTuiOptions {
  * scrolls inside the window while the editor stays pinned at the bottom. The
  * plain main screen has no layout engine, and a scroll view inside it would
  * silently render nothing.
- */
-/**
- * A step in the transcript.
  *
- * The human sees the title: the name the agent gave the step and what it
- * was for. Everything the step produced - the code, the logs, the value -
- * belongs to it, and opens and closes with it. One keystroke away, and
- * not in the way.
+ * Liveness belongs to the work: the thinking fold spins while the model
+ * reasons, the step spins while it runs, and each line settles where it
+ * stands. The bar underneath the editor shows only what outlives the work -
+ * where the session is, who it is talking to, and what it now weighs - so it
+ * never asks the eye to follow two clocks at once.
  */
-interface StepBlock {
-  readonly header: Text;
-  readonly code: Text;
-  readonly group: Container;
-  readonly details: Text[];
-  label: string;
-  expanded: boolean;
-  failed: boolean;
-}
-
-/**
- * The reasoning that came before a reply.
- *
- * It is its own fold, above the step, because that is the order it happened
- * in - and the step's name was chosen inside it. Folded, it reports only
- * what it cost: how much and how long. The words are one keystroke away.
- */
-interface ThoughtBlock {
-  readonly header: Text;
-  readonly body: Text;
-  readonly group: Container;
-  expanded: boolean;
-}
-
 export class PiTuiUi implements UiPort {
   readonly #tui: TuiAltScreen;
   readonly #document: Container;
   readonly #editor: Editor;
-  /** The pinned line: who you are talking to, and what the turn costs. */
+  /** The line under the editor: the session's standing, not the turn's. */
   readonly #bar: Component;
-  readonly #status: Text;
   readonly #options: PiTuiOptions;
   #block: StepBlock | undefined;
+  /** Whether the current reply's step block is still open for this reply. */
+  #blockOpen = false;
+  #thought: ThoughtBlock | undefined;
+  /** The line that says the turn is under way before there is anything to fold. */
+  #pending: Text | undefined;
+  #pendingStartedAt = 0;
   #inputHandler: ((text: string) => void) | undefined;
   #done: (() => void) | undefined;
   #stopped = false;
-  #busy = false;
-  #statusText: string | undefined;
   #quitHint: string | undefined;
   #quitTimer: NodeJS.Timeout | undefined;
   #spinnerTimer: NodeJS.Timeout | undefined;
   #spinnerFrame = 0;
-  /** Steps done in the current turn, against the budget. */
-  #turnSteps = 0;
-  #maxSteps: number | undefined;
+  /** Whether the near-limit note has been written for this turn. */
+  #nearLimitReported = false;
   /** What the latest model call cost. Outlives the turn: it is the context line. */
   #usage: LlmUsage | undefined;
-  /** Output tokens spent by the current turn so far. */
-  #turnOutput = 0;
-  /** The step the agent is on right now - gone as soon as the next reply starts. */
-  #currentStep: string | undefined;
-  #turnStartedAt: number | undefined;
-  #thought: ThoughtBlock | undefined;
-  /** What the newest thought cost: its size and how long it took. */
-  #thoughtCost: { readonly chars: number; readonly elapsed: number } | undefined;
-  /** When the current reply's reasoning first arrived. */
-  #thoughtStartedAt: number | undefined;
-  /** Whether the model is reasoning right now, rather than writing. */
-  #thinking = false;
+  /** The directory and the branch, read again once a second - not once a frame. */
+  #cachedLocation: Location | undefined;
+  #locationReadAt = 0;
 
   constructor(options: PiTuiOptions) {
     this.#options = options;
@@ -213,7 +241,6 @@ export class PiTuiUi implements UiPort {
       scrollToEndIndicator: () => dim(' ↓ jump to latest '),
     });
     this.#document = new Container();
-    this.#status = new Text('');
     this.#bar = {
       // Composed at render time, so a resized terminal gets a bar that fits
       // it, not a bar that fit what the terminal used to be.
@@ -223,8 +250,6 @@ export class PiTuiUi implements UiPort {
     this.#editor = new Editor(this.#tui, editorTheme);
     this.#editor.onSubmit = (text: string) => this.#submit(text);
 
-    // The model and the endpoint moved to the bar: they are only useful
-    // while they are on the screen, and the transcript scrolls.
     this.#document.addChild(new Text(dim('replagent · the only language here is javascript')));
     this.#document.addChild(new Text(''));
 
@@ -235,10 +260,11 @@ export class PiTuiUi implements UiPort {
       scrollbar: 'auto',
     });
 
+    // The bar is the last thing on the screen: it is the session's standing
+    // line, and a standing line belongs at the foot of the page.
     const dock = new VStack([
-      { component: this.#bar, shrink: 1, minSize: 1 },
-      { component: this.#status, shrink: 1, minSize: 0 },
       { component: this.#editor, shrink: 1, minSize: 3 },
+      { component: this.#bar, shrink: 1, minSize: 1 },
     ]);
 
     const root = new VStack([
@@ -281,51 +307,30 @@ export class PiTuiUi implements UiPort {
   }
 
   emit(event: UiEvent): void {
-    if (event.type === 'agent-code-delta') {
-      // A new reply is being written, and the step it belongs to has no name
-      // yet: whatever the bar showed for the previous step is stale now.
-      this.#currentStep = undefined;
-      this.#thinking = false;
-      this.#appendStreaming(event.text);
-    } else if (event.type === 'agent-code') {
-      this.#completeStreaming(event.text);
-    } else if (event.type === 'agent-thinking-delta') {
-      this.#startThinking();
+    if (event.type === 'agent-thinking-delta') {
+      this.#thinkingDelta(event.chars);
     } else if (event.type === 'agent-thinking') {
       this.#completeThinking(event.text);
+    } else if (event.type === 'agent-code-delta') {
+      this.#codeStarted();
+    } else if (event.type === 'agent-code') {
+      this.#completeStreaming(event.text);
     } else if (event.type === 'step') {
       this.#labelStep(event.name, event.description);
+    } else if (event.type === 'exec-done') {
+      this.#execDone();
     } else if (event.type === 'busy') {
       this.#applyBusy(event.busy);
     } else if (event.type === 'turn-progress') {
-      this.#turnSteps = event.steps;
-      this.#maxSteps = event.maxSteps;
+      this.#applyProgress(event.steps, event.maxSteps);
     } else if (event.type === 'turn-usage') {
+      // What the conversation weighs now. It outlives the turn, because
+      // that is what the next turn will carry.
       this.#usage = event.usage;
-      this.#turnOutput += event.usage.output;
     } else {
       this.#appendBlock(event);
     }
     this.#tui.requestRender();
-  }
-
-  #applyBusy(busy: boolean): void {
-    if (busy) {
-      // A new turn starts. The code block belongs to a turn, so the next
-      // turn gets its own - and a step that arrives late must not label
-      // the block of the turn that follows it.
-      this.#relabel(this.#block, false);
-      this.#block = undefined;
-      this.#relabelThought(false);
-      this.#thought = undefined;
-      this.#turnSteps = 0;
-      this.#turnOutput = 0;
-      this.#currentStep = undefined;
-      this.#turnStartedAt = Date.now();
-    } else {
-      this.#turnStartedAt = undefined;
-    }
-    this.#setBusy(busy);
   }
 
   onInput(handler: (text: string) => void): void {
@@ -409,6 +414,9 @@ export class PiTuiUi implements UiPort {
   /**
    * First ctrl+c interrupts the running turn, second one quits. Two presses
    * within two seconds, so a stray ctrl+c never kills the session.
+   *
+   * The warning takes the bar for as long as it is true: it is about the
+   * session, which is exactly what the bar is for.
    */
   #handleInterrupt(): void {
     if (this.#quitHint !== undefined) {
@@ -420,15 +428,18 @@ export class PiTuiUi implements UiPort {
     this.#quitTimer = setTimeout(() => {
       this.#quitTimer = undefined;
       this.#quitHint = undefined;
-      this.#renderStatus();
+      this.#tui.requestRender();
     }, QUIT_CONFIRM_MS);
     this.#quitTimer.unref();
 
-    this.#renderStatus();
     this.#options.onInterrupt?.();
     this.#tui.requestRender();
   }
 
+  /**
+   * Everything that is not part of the turn's own clock: the human, the
+   * REPL's answers, the final line, and the notes about the run.
+   */
   #appendBlock(
     event: Exclude<
       UiEvent,
@@ -436,7 +447,11 @@ export class PiTuiUi implements UiPort {
       | { type: 'agent-code' }
       | { type: 'agent-thinking-delta' }
       | { type: 'agent-thinking' }
+      | { type: 'exec-done' }
+      | { type: 'step' }
       | { type: 'busy' }
+      | { type: 'turn-progress' }
+      | { type: 'turn-usage' }
     >,
   ): void {
     switch (event.type) {
@@ -457,10 +472,15 @@ export class PiTuiUi implements UiPort {
         this.#document.addChild(new Text(`\n${event.text}`));
         return;
       case 'status':
-        this.#statusText = event.text;
-        this.#renderStatus();
+        // A note is a receipt: it happened, and it stays in the transcript
+        // after the turn that produced it is over.
+        this.#note(event.text);
         return;
     }
+  }
+
+  #note(text: string): void {
+    this.#document.addChild(new Text(`${dim('  note')} ${dim(text)}`));
   }
 
   /**
@@ -481,58 +501,237 @@ export class PiTuiUi implements UiPort {
     }
   }
 
-  #appendStreaming(_delta: string): void {
-    // The step is folded away, so there is nothing to show while it is
-    // being written: the title it turns out to be says more than the code.
-  }
-
-  /** The model has started reasoning; the bar says so until it starts writing. */
-  #startThinking(): void {
-    if (!this.#thinking) {
-      this.#thinking = true;
-      this.#thoughtStartedAt = Date.now();
+  #applyProgress(steps: number, maxSteps: number): void {
+    if (this.#nearLimitReported || maxSteps <= 0 || steps / maxSteps < NEAR_LIMIT) {
+      return;
     }
+    // Said once, when the budget starts to run out, and then left alone:
+    // a warning repeated every step is a warning nobody reads.
+    this.#nearLimitReported = true;
+    this.#note(`${steps} of ${maxSteps} steps used.`);
   }
 
-  /**
-   * The reasoning arrived, complete.
-   *
-   * It becomes its own fold, above the step that follows it - the order it
-   * happened in, and the place the step's name came from. Shut, it reports
-   * what it cost; the words are on ctrl+o.
-   */
-  #completeThinking(text: string): void {
-    const elapsed = this.#thoughtStartedAt === undefined ? 0 : Date.now() - this.#thoughtStartedAt;
-    this.#thinking = false;
-    this.#thoughtStartedAt = undefined;
+  #applyBusy(busy: boolean): void {
+    if (busy) {
+      // A new turn starts. The folds of the last one stay where they are,
+      // but they are nobody's newest step any more, and the work of this
+      // turn has its own line.
+      this.#relabel(this.#block, false);
+      this.#block = undefined;
+      this.#blockOpen = false;
+      this.#relabelThought(false);
+      this.#thought = undefined;
+      this.#nearLimitReported = false;
+      this.#openPending();
+    } else {
+      // The turn is over. Work that never got far enough to say anything
+      // leaves nothing behind; work that produced something settles where
+      // it stands, so the transcript still says what was run.
+      this.#clearPending();
+      this.#discardLiveThought();
+      this.#settleLiveStep();
+    }
+    this.#setBusy(busy);
+  }
 
-    // ctrl+o follows the newest thought, so the previous one gives up the
-    // hint first.
-    this.#relabelThought(false);
+  #openPending(): void {
+    if (this.#pending !== undefined) {
+      return;
+    }
+    const line = new Text('');
+    this.#pending = line;
+    this.#pendingStartedAt = Date.now();
+    this.#document.addChild(line);
+    this.#tickLive();
+  }
 
+  #clearPending(): void {
+    const line = this.#pending;
+    if (line === undefined) {
+      return;
+    }
+    this.#document.removeChild(line);
+    this.#pending = undefined;
+  }
+
+  /** The model is reasoning. Its fold starts here, alive, and counts as it grows. */
+  #thinkingDelta(chars: number): void {
+    this.#clearPending();
+    if (this.#thought === undefined || !this.#thought.live) {
+      this.#relabelThought(false);
+      this.#openThought();
+    }
+    const block = this.#thought;
+    if (block === undefined) {
+      return;
+    }
+    block.chars = chars;
+    this.#relabelThought(true);
+  }
+
+  #openThought(): ThoughtBlock {
     const header = new Text('');
     const group = new Container();
     group.addChild(header);
 
     const block: ThoughtBlock = {
       header,
-      body: new Text(thinkingBody(text)),
+      body: undefined,
       group,
       expanded: false,
+      live: true,
+      startedAt: Date.now(),
+      chars: 0,
+      elapsed: undefined,
     };
 
     this.#document.addChild(group);
     this.#thought = block;
-    this.#thoughtCost = { chars: text.length, elapsed };
+    return block;
+  }
+
+  /**
+   * The reasoning arrived, complete.
+   *
+   * The line that was counting settles on the same row and states what the
+   * thought cost. The words are on ctrl+o.
+   */
+  #completeThinking(text: string): void {
+    this.#clearPending();
+    const existing = this.#thought;
+    const block = existing?.live === true ? existing : this.#openThinkingOnArrival(text);
+    block.live = false;
+    block.chars = text.length;
+    block.elapsed = Date.now() - block.startedAt;
+    block.body = new Text(thinkingBody(text));
+    if (block.expanded) {
+      block.group.addChild(block.body);
+    }
     this.#relabelThought(true);
   }
 
+  /** The full reasoning arrived without deltas: the fold still happened. */
+  #openThinkingOnArrival(text: string): ThoughtBlock {
+    this.#relabelThought(false);
+    const block = this.#openThought();
+    block.chars = text.length;
+    return block;
+  }
+
+  #discardLiveThought(): void {
+    const block = this.#thought;
+    if (block === undefined || !block.live) {
+      return;
+    }
+    // It never finished, so there is no reasoning to show: a receipt for
+    // words nobody can read is not worth the row.
+    this.#document.removeChild(block.group);
+    this.#thought = undefined;
+  }
+
+  /** The first chunk of code: the step's line replaces "replying". */
+  #codeStarted(): void {
+    this.#clearPending();
+    if (this.#block !== undefined && this.#blockOpen) {
+      return;
+    }
+    this.#relabel(this.#block, false);
+    this.#openStepBlock('writing');
+  }
+
+  #openStepBlock(phase: 'writing' | 'running'): StepBlock {
+    const header = new Text('');
+    const group = new Container();
+    group.addChild(header);
+
+    const block: StepBlock = {
+      header,
+      code: undefined,
+      group,
+      details: [],
+      label: undefined,
+      phase,
+      expanded: false,
+      failed: false,
+      live: true,
+      startedAt: Date.now(),
+      elapsed: undefined,
+    };
+
+    this.#document.addChild(group);
+    this.#block = block;
+    this.#blockOpen = true;
+    this.#relabel(block, true);
+    return block;
+  }
+
+  /**
+   * The reply is complete and about to run. The line stops saying
+   * "writing" and starts saying what the step is - or that it is running,
+   * until the code names itself.
+   */
+  #completeStreaming(code: string): void {
+    this.#clearPending();
+    let block = this.#block;
+    if (block === undefined || !this.#blockOpen) {
+      this.#relabel(block, false);
+      block = this.#openStepBlock('running');
+    }
+    block.phase = 'running';
+    block.code = new Text(this.#renderCodeBody(this.#colour(this.#format(code))));
+    if (block.expanded) {
+      block.group.addChild(block.code);
+    }
+    this.#relabel(block, true);
+  }
+
+  /** The code finished running: the line settles, with the time it took. */
+  #execDone(): void {
+    const block = this.#block;
+    if (block === undefined) {
+      return;
+    }
+    this.#settle(block);
+    this.#blockOpen = false;
+    this.#relabel(block, true);
+  }
+
+  #settleLiveStep(): void {
+    const block = this.#block;
+    if (block === undefined || !block.live) {
+      return;
+    }
+    if (block.code === undefined) {
+      // Interrupted before the reply was complete: there is no code to
+      // open, so there is no fold to leave behind.
+      this.#document.removeChild(block.group);
+      this.#block = undefined;
+      this.#blockOpen = false;
+      return;
+    }
+    this.#settle(block);
+    this.#blockOpen = false;
+    this.#relabel(block, true);
+  }
+
+  #settle(block: StepBlock): void {
+    if (!block.live) {
+      return;
+    }
+    block.live = false;
+    block.elapsed = Date.now() - block.startedAt;
+  }
+
   #toggleThought(block: ThoughtBlock): void {
+    const body = block.body;
+    if (body === undefined) {
+      return;
+    }
     block.expanded = !block.expanded;
     if (block.expanded) {
-      block.group.addChild(block.body);
+      block.group.addChild(body);
     } else {
-      block.group.removeChild(block.body);
+      block.group.removeChild(body);
     }
     this.#relabelThought(true);
     this.#tui.requestRender();
@@ -545,49 +744,31 @@ export class PiTuiUi implements UiPort {
     }
   }
 
-  /** The thought's header: what it cost, and whether it is open. */
-  #thoughtLabel(expanded: boolean, latest: boolean): string {
-    const marker = expanded ? cyan('▼') : dim('▶');
-    const cost = this.#thoughtCost;
-    const seconds = cost === undefined ? '' : ` · ${formatSeconds(cost.elapsed)}`;
-    const size = cost === undefined ? '' : ` ${formatTokens(cost.chars)} chars`;
-    const title = `${marker} ${dim(`Thought${size}${seconds}`)}`;
-    if (!latest) {
+  /** The thought's header: alive while it grows, then what it cost. */
+  #thoughtLabel(block: ThoughtBlock, latest: boolean): string {
+    const marker = block.live ? cyan(this.#spinner()) : dim('●');
+    const seconds = block.live
+      ? Date.now() - block.startedAt
+      : block.elapsed === undefined
+        ? undefined
+        : block.elapsed;
+    const cost = [`${formatTokens(block.chars)} chars`];
+    if (seconds !== undefined) {
+      cost.push(formatSeconds(seconds));
+    }
+    const title = `${marker} ${dim(`Thought ${cost.join(' · ')}`)}`;
+    if (!latest || block.live) {
       return title;
     }
-    const hint = expanded ? 'ctrl+o closes the thinking' : 'ctrl+o opens the thinking';
+    const hint = block.expanded ? 'ctrl+o closes the thinking' : 'ctrl+o opens the thinking';
     return `${title}   ${dim(`· ${hint}`)}`;
   }
 
   #relabelThought(latest: boolean): void {
     const block = this.#thought;
     if (block !== undefined) {
-      block.header.setText(this.#thoughtLabel(block.expanded, latest));
+      block.header.setText(this.#thoughtLabel(block, latest));
     }
-  }
-
-  #completeStreaming(code: string): void {
-    // ctrl+e follows the newest step, so the previous step's header gives up
-    // the hint first: a hint that points nowhere is worse than none.
-    this.#relabel(this.#block, false);
-
-    const header = new Text('');
-    const group = new Container();
-    group.addChild(header);
-
-    const block: StepBlock = {
-      header,
-      code: new Text(this.#renderCodeBody(this.#colour(this.#format(code)))),
-      group,
-      details: [],
-      label: 'js',
-      expanded: false,
-      failed: false,
-    };
-
-    this.#document.addChild(group);
-    this.#block = block;
-    this.#relabel(block, true);
   }
 
   /**
@@ -601,12 +782,16 @@ export class PiTuiUi implements UiPort {
     block.expanded = !block.expanded;
 
     if (block.expanded) {
-      block.group.addChild(block.code);
+      if (block.code !== undefined) {
+        block.group.addChild(block.code);
+      }
       for (const detail of block.details) {
         block.group.addChild(detail);
       }
     } else {
-      block.group.removeChild(block.code);
+      if (block.code !== undefined) {
+        block.group.removeChild(block.code);
+      }
       for (const detail of block.details) {
         block.group.removeChild(detail);
       }
@@ -625,19 +810,36 @@ export class PiTuiUi implements UiPort {
    */
   #toggleLatestStep(): void {
     const block = this.#block;
-    if (block === undefined) {
-      return;
+    if (block !== undefined) {
+      this.#toggleStep(block);
     }
-    this.#toggleStep(block);
+  }
+
+  /** What the step is doing, or what it did. */
+  #stepName(block: StepBlock): string {
+    if (block.label !== undefined) {
+      return block.label;
+    }
+    if (!block.live) {
+      return 'js';
+    }
+    return block.phase === 'writing' ? 'writing' : 'running';
   }
 
   #blockLabel(block: StepBlock, latest: boolean): string {
-    const marker = block.expanded ? cyan('▼') : dim('▶');
-    const title = `${marker} ${block.label}`;
+    const marker = block.live ? cyan(this.#spinner()) : dim('●');
+    const seconds = block.live
+      ? Date.now() - block.startedAt
+      : block.elapsed === undefined
+        ? undefined
+        : block.elapsed;
+    const title = `${marker} ${dim(this.#stepName(block))}${
+      seconds === undefined ? '' : dim(` · ${formatSeconds(seconds)}`)
+    }`;
     // A step that failed says so, even folded away: a transcript that
     // hides the failure is a transcript that lies by omission.
     const body = block.failed ? red(title) : title;
-    if (!latest) {
+    if (!latest || block.live) {
       return body;
     }
     // The affordance lives at the tail of the fold, on the newest step:
@@ -660,14 +862,19 @@ export class PiTuiUi implements UiPort {
       return;
     }
     block.failed = true;
+    this.#settle(block);
+    // Rejected code never runs, so no exec-done will close this block:
+    // without this the next reply would write into it.
+    this.#blockOpen = false;
     this.#relabel(block, true);
   }
 
   /**
-   * Put the step's name and description on the code block.
+   * Put the step's name and description on the step.
    *
-   * The block was created when the code arrived; the step comes after it,
-   * because the agent only says what the step was once it has written it.
+   * The step names itself before its body runs, so this arrives while the
+   * line is still alive - which is the point: the human sees what the
+   * agent is doing, not what it did.
    */
   #labelStep(name: string, description: string): void {
     const block = this.#block;
@@ -675,9 +882,6 @@ export class PiTuiUi implements UiPort {
       return;
     }
     block.label = `${name} - ${description}`;
-    // The name is also the bar's "what is it doing right now", so it stays
-    // readable while the human is scrolled away from the newest step.
-    this.#currentStep = name;
     this.#relabel(block, true);
   }
 
@@ -708,19 +912,45 @@ export class PiTuiUi implements UiPort {
     return highlighter.highlight(code);
   }
 
+  #spinner(): string {
+    return SPINNER_FRAMES[this.#spinnerFrame % SPINNER_FRAMES.length] ?? '';
+  }
+
+  #pendingLabel(now: number): string {
+    return `${cyan(this.#spinner())} ${dim(`replying · ${formatSeconds(now - this.#pendingStartedAt)}`)}`;
+  }
+
   /**
-   * The spinner answers "did my message even go out?": as soon as the agent
-   * starts working, the status bar spins, and it stops when the turn is
-   * over. The bar reads the clock off the same tick, so the seconds move
-   * with the frames.
+   * Move the clock on every line that is alive.
+   *
+   * Only the work moves. The bar is a statement about the session, and a
+   * statement does not tick.
+   */
+  #tickLive(): void {
+    const now = Date.now();
+    if (this.#pending !== undefined) {
+      this.#pending.setText(this.#pendingLabel(now));
+    }
+    const thought = this.#thought;
+    if (thought?.live === true) {
+      thought.header.setText(this.#thoughtLabel(thought, true));
+    }
+    const block = this.#block;
+    if (block?.live === true) {
+      block.header.setText(this.#blockLabel(block, true));
+    }
+  }
+
+  /**
+   * The spinner answers "did my message even go out?": the line of the
+   * work that is running spins, and it settles when the work is done.
    */
   #setBusy(busy: boolean): void {
-    this.#busy = busy;
     if (busy) {
       if (this.#spinnerTimer === undefined) {
         this.#spinnerTimer = setInterval(() => {
           this.#spinnerFrame += 1;
-          this.#renderStatus();
+          this.#tickLive();
           this.#tui.requestRender();
         }, SPINNER_INTERVAL_MS);
         this.#spinnerTimer.unref();
@@ -729,116 +959,121 @@ export class PiTuiUi implements UiPort {
       clearInterval(this.#spinnerTimer);
       this.#spinnerTimer = undefined;
     }
-    this.#renderStatus();
+    this.#tickLive();
   }
 
-  #renderStatus(): void {
-    const parts: string[] = [];
-    if (this.#quitHint !== undefined) {
-      parts.push(dim(this.#quitHint));
+  #location(): Location {
+    const now = Date.now();
+    if (this.#cachedLocation !== undefined && now - this.#locationReadAt < LOCATION_REFRESH_MS) {
+      return this.#cachedLocation;
     }
-    if (this.#statusText !== undefined && this.#statusText.length > 0) {
-      parts.push(dim(this.#statusText));
-    }
-    this.#status.setText(parts.join('   '));
+    const location = (this.#options.location ?? defaultLocation)();
+    this.#cachedLocation = location;
+    this.#locationReadAt = now;
+    return location;
   }
 
   /**
    * The status bar.
    *
-   * On the left, who you are talking to. On the right, what the agent is
-   * doing and what it costs - and when the agent is idle, only what the
-   * conversation now weighs. Everything on it answers a question the human
-   * actually has, and the narrow terminal takes the answers away in
-   * ascending order of importance.
+   * On the left, where the session is and who it talks to. On the right,
+   * what the conversation weighs - the only numbers that outlive a turn.
+   * None of it moves while the agent works: liveness is on the step.
    */
   #renderBar(width: number): string {
-    const left = dim(this.#barIdentity());
-    return this.#fitBar(left, this.#barItems(), width);
-  }
+    const variants = this.#barIdentityVariants().map((variant) => dim(variant));
+    const items = this.#barItems();
 
-  #barIdentity(): string {
-    return [this.#options.model, this.#options.endpoint ?? '']
-      .filter((part) => part.length > 0)
-      .join(' · ');
+    // The numbers are what the bar exists for, so they leave last: first
+    // the cache rate, then the context weight, and only then the identity
+    // starts shortening.
+    for (let count = items.length; count >= 0; count -= 1) {
+      const right = items.slice(0, count).join(BAR_SEPARATOR);
+      const gap = count > 0 ? MIN_GAP : 0;
+      const room = width - visibleWidth(right) - gap;
+      const left = variants.find((variant) => visibleWidth(variant) <= room);
+      if (left !== undefined) {
+        const slack = width - visibleWidth(left) - visibleWidth(right);
+        return `${left}${' '.repeat(slack)}${right}`;
+      }
+    }
+
+    return truncateToWidth(variants[variants.length - 1] ?? '', width);
   }
 
   /**
-   * The right side of the bar, most important first.
-   *
-   * While the agent works: the spinner and the step counter, the weight of
-   * the conversation, the cache rate, the age of the turn, its output, and
-   * the step it is on. When it rests: only what the last request carried.
+   * The left half, longest first. The path gives up its leading segments,
+   * then the endpoint and the model leave - the directory and the branch
+   * are where you are, and that is the last thing to go.
+   */
+  #barIdentityVariants(): string[] {
+    const location = this.#location();
+    const branch = location.branch === undefined ? undefined : `⎇ ${location.branch}`;
+    const model = this.#options.model;
+    const endpoint = this.#endpointSegment();
+    const variant = (
+      where: string,
+      keepBranch: boolean,
+      keepModel: boolean,
+      keepEndpoint: boolean,
+    ): string =>
+      [
+        where,
+        keepBranch ? branch : undefined,
+        keepModel ? model : undefined,
+        keepEndpoint ? endpoint : undefined,
+      ]
+        .filter((part): part is string => part !== undefined && part.length > 0)
+        .join(' · ');
+
+    return [
+      variant(location.path, true, true, true),
+      variant(elidePath(location.path, 2), true, true, true),
+      variant(elidePath(location.path, 1), true, true, true),
+      variant(elidePath(location.path, 1), true, true, false),
+      variant(elidePath(location.path, 1), true, false, false),
+      variant(elidePath(location.path, 1), false, false, false),
+    ];
+  }
+
+  #endpointSegment(): string | undefined {
+    const endpoint = this.#options.endpoint;
+    if (endpoint === undefined || endpoint.length === 0 || endpoint === DEFAULT_ENDPOINT) {
+      return undefined;
+    }
+    return endpoint;
+  }
+
+  /**
+   * The right side of the bar: what the conversation weighs, and how much
+   * of it the cache served. Nothing about the turn belongs here - it is
+   * over almost as soon as you read it.
    */
   #barItems(): string[] {
-    const items: string[] = [];
-    if (this.#busy) {
-      items.push(this.#activity());
+    if (this.#quitHint !== undefined) {
+      return [yellow(this.#quitHint)];
     }
-    if (this.#usage !== undefined) {
-      items.push(dim(`${formatTokens(this.#usage.input)} in`));
-      const rate = cacheRate(this.#usage);
-      if (rate !== undefined) {
-        items.push(dim(`${rate}% cached`));
-      }
+    const usage = this.#usage;
+    if (usage === undefined) {
+      return [];
     }
-    if (this.#busy) {
-      const elapsed = formatElapsed(this.#turnStartedAt);
-      if (elapsed.length > 0) {
-        items.push(dim(elapsed));
-      }
-      items.push(dim(`${formatTokens(this.#turnOutput)} out`));
-    }
-    if (this.#busy) {
-      const working = this.#thinking ? 'thinking' : this.#currentStep;
-      if (working !== undefined) {
-        items.push(dim(working));
-      }
+    const items = [this.#contextItem(usage)];
+    const rate = cacheRate(usage);
+    if (rate !== undefined) {
+      items.push(dim(`${rate}% cached`));
     }
     return items;
   }
 
-  /** The spinner and, once the budget is known, the step counter. */
-  #activity(): string {
-    const frame = SPINNER_FRAMES[this.#spinnerFrame % SPINNER_FRAMES.length] ?? '';
-    let text = cyan(frame);
-    if (this.#maxSteps !== undefined) {
-      const counter = `step ${this.#turnSteps}/${this.#maxSteps}`;
-      text += ` ${this.#nearLimit() ? yellow(counter) : counter}`;
+  /** The prompt against the window it fits in - `45.2k/200k` - when known. */
+  #contextItem(usage: LlmUsage): string {
+    const used = formatTokens(usage.input);
+    const window = this.#options.contextWindow;
+    if (window === undefined) {
+      return dim(`${used} ctx`);
     }
-    return text;
-  }
-
-  #nearLimit(): boolean {
-    return this.#maxSteps !== undefined && this.#turnSteps / this.#maxSteps >= NEAR_LIMIT;
-  }
-
-  /**
-   * Fit both halves on one line.
-   *
-   * The right side gives up its items from the far end - the step name,
-   * then the output, the seconds, the cache rate, the token counts - until
-   * what is left fits beside the identity. Then the identity shortens, and
-   * only past that does the bar stop being two halves at all.
-   */
-  #fitBar(left: string, items: readonly string[], width: number): string {
-    let shown = items;
-    let right = shown.join(BAR_SEPARATOR);
-    while (shown.length > 1 && visibleWidth(left) + visibleWidth(right) + MIN_GAP > width) {
-      shown = shown.slice(0, -1);
-      right = shown.join(BAR_SEPARATOR);
-    }
-
-    const slack = width - visibleWidth(left) - visibleWidth(right);
-    if (slack >= MIN_GAP) {
-      return `${left}${' '.repeat(slack)}${right}`;
-    }
-
-    const room = width - visibleWidth(right) - MIN_GAP;
-    if (room >= MIN_IDENTITY) {
-      return `${truncateToWidth(left, room)}${' '.repeat(MIN_GAP)}${right}`;
-    }
-    return truncateToWidth(right, width);
+    const text = `${used}/${formatTokens(window)}`;
+    return usage.input / window >= NEAR_CONTEXT ? yellow(text) : dim(text);
   }
 
   #clearTimers(): void {

@@ -112,7 +112,12 @@ export async function runAgentTurn(
     conversation.append('assistant', prepared.code);
     deps.ui.emit({ type: 'agent-code', text: prepared.code });
 
-    const observation = await deps.repl.exec(prepared.code);
+    // The step names itself while it runs, so the transcript can say what
+    // is being done instead of waiting for the observation to come back.
+    const observation = await deps.repl.exec(prepared.code, (step) => {
+      deps.ui.emit({ type: 'step', name: step.name, description: step.description });
+    });
+    deps.ui.emit({ type: 'exec-done' });
     const reported = withTeachingNote(prepared.invalidSyntax, observation);
     emitObservation(deps.ui, reported);
     conversation.append('user', formatObservation(reported));
@@ -163,7 +168,7 @@ async function collectCode(
       }
       if (event.type === 'thinking') {
         thinking += event.text;
-        deps.ui.emit({ type: 'agent-thinking-delta' });
+        deps.ui.emit({ type: 'agent-thinking-delta', chars: thinking.length });
         continue;
       }
       stopReason = event.stopReason;
@@ -205,13 +210,7 @@ function withTeachingNote(invalidSyntax: boolean, observation: ReplObservation):
 }
 
 function emitObservation(ui: UiPort, observation: ReplObservation): void {
-  if (observation.step !== undefined) {
-    ui.emit({
-      type: 'step',
-      name: observation.step.name,
-      description: observation.step.description,
-    });
-  }
+  // The step was already reported when it named itself, before it ran.
   for (const log of observation.logs) {
     ui.emit({ type: 'repl-log', text: log });
   }

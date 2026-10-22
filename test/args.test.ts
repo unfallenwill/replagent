@@ -8,7 +8,14 @@ describe('parseArgs', () => {
     expect(options.baseUrl).toBeUndefined();
     expect(options.maxTokens).toBe(8192);
     expect(options.maxSteps).toBe(24);
+    expect(options.contextWindow).toBeUndefined();
     expect(options.world).toBe(DEFAULT_WORLD_PATH);
+  });
+
+  it('reads the context window', () => {
+    const options = parseArgs(['--context-window', '1000000'], {});
+
+    expect(options.contextWindow).toBe(1_000_000);
   });
 
   it('reads where to keep the world model', () => {

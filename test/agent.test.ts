@@ -166,4 +166,31 @@ describe('runAgentTurn', () => {
     expect(ui.events).toContainEqual({ type: 'repl-log', text: 'hi' });
     expect(ui.events).toContainEqual({ type: 'agent-code', text: 'console.log("hi")' });
   });
+
+  it('emits a code event for a rejected turn as well', async () => {
+    // The model emits a tool call: the turn is rejected, but the transcript
+    // still has to show what it produced, and the code block has to be
+    // closed - otherwise the next step writes into it.
+    const llm = new ScriptedLlm(['<tool_call>{"name": "fetch"}</tool_call>', 'console.log("ok")']);
+    const repl = new ScriptedRepl([{ ...noopObservation }]);
+    const ui = new RecordingUi();
+
+    await runAgentTurn(
+      deps(llm, repl, ui, 4),
+      new Conversation(),
+      'do something',
+      new AbortController().signal,
+    );
+
+    const codeTexts = ui.events.flatMap((event) =>
+      event.type === 'agent-code' ? [event.text] : [],
+    );
+
+    // The rejected step still reports what it produced, so the block is
+    // closed and the next step writes below it.
+    expect(codeTexts.length).toBeGreaterThanOrEqual(2);
+    expect(codeTexts[0]).toContain('tool_call');
+    expect(codeTexts[1]).toBe('console.log("ok")');
+    expect(ui.events.some((event) => event.type === 'repl-error')).toBe(true);
+  });
 });

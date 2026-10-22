@@ -164,6 +164,39 @@ describe('PiTuiUi', () => {
     ui.stop();
   });
 
+  it('keeps alternating code and error in the order they happened', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({ model: 'test-model', terminal });
+
+    void ui.run();
+    await tick();
+
+    // step 1: code, then the REPL rejects it
+    ui.emit({ type: 'busy', busy: true });
+    ui.emit({ type: 'agent-code-delta', text: 'console.log("first")' });
+    ui.emit({ type: 'agent-code', text: 'console.log("first")' });
+    ui.emit({ type: 'repl-error', text: 'ERROR: first failure' });
+
+    // step 2: the model writes code again, and it fails too
+    ui.emit({ type: 'agent-code-delta', text: 'console.log("second")' });
+    ui.emit({ type: 'agent-code', text: 'console.log("second")' });
+    ui.emit({ type: 'repl-error', text: 'ERROR: second failure' });
+    await tick();
+
+    const screen = plain(terminal.output);
+    const first = screen.indexOf('console.log("first")');
+    const firstError = screen.indexOf('ERROR: first failure');
+    const second = screen.indexOf('console.log("second")');
+    const secondError = screen.indexOf('ERROR: second failure');
+
+    expect(first).toBeGreaterThan(-1);
+    expect(firstError).toBeGreaterThan(first);
+    expect(second).toBeGreaterThan(firstError);
+    expect(secondError).toBeGreaterThan(second);
+
+    ui.stop();
+  });
+
   it('puts the code of the next turn below the error of the previous one', async () => {
     const terminal = new FakeTerminal();
     const ui = new PiTuiUi({ model: 'test-model', terminal });

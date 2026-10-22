@@ -61,6 +61,10 @@ export async function runAgentTurn(
     // not cost the agent a step of its budget, it only costs a round trip.
     if (prepared.problem !== undefined) {
       rejections += 1;
+      // The step still ends with a code event, so the transcript shows what
+      // the model actually produced and the block is closed. Without it the
+      // next step would write its code into this step's block.
+      deps.ui.emit({ type: 'agent-code', text: prepared.code });
       deps.ui.emit({ type: 'repl-error', text: prepared.problem });
       conversation.append('assistant', prepared.code);
       conversation.append(

@@ -2,6 +2,7 @@ import process from 'node:process';
 import { Anthropic } from '@anthropic-ai/sdk';
 import { AnthropicLlm } from '../adapters/anthropic/anthropic-llm.js';
 import { JsBeautifyFormatter } from '../adapters/format/js-beautify.js';
+import { JsHighlighter } from '../adapters/format/js-highlight.js';
 import { NodeReplSession } from '../adapters/repl/node-repl.js';
 import { PiTuiUi } from '../adapters/tui/pi-tui-ui.js';
 import { FileWorld } from '../adapters/world/file-world.js';
@@ -41,6 +42,7 @@ async function main(): Promise<void> {
     model: options.model,
     endpoint: endpointLabel(client.baseURL),
     formatter: new JsBeautifyFormatter(),
+    highlighter: new JsHighlighter(),
     onInterrupt: () => {
       currentController?.abort();
     },

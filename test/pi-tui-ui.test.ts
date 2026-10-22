@@ -1,5 +1,6 @@
 import type { ProgramStatus, Terminal } from '@earendil-works/pi-tui';
 import { describe, expect, it } from 'vitest';
+import { JsHighlighter } from '../src/adapters/format/js-highlight.js';
 import { PiTuiUi } from '../src/adapters/tui/pi-tui-ui.js';
 
 class FakeTerminal implements Terminal {
@@ -141,6 +142,29 @@ describe('PiTuiUi', () => {
     await tick(120);
 
     expect(plain(terminal.output)).toContain('hidden');
+
+    ui.stop();
+  });
+
+  it('colours the code when the step is asked for', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({
+      model: 'test-model',
+      terminal,
+      highlighter: new JsHighlighter(),
+    });
+
+    void ui.run();
+    await tick();
+
+    ui.emit({ type: 'agent-code', text: 'const answer = 42;' });
+    ui.emit({ type: 'step', name: 'answer', description: 'the answer' });
+    await tick();
+
+    terminal.onInput?.('\x05');
+    await tick(120);
+
+    expect(terminal.output).toContain('\u001b[36mconst\u001b[0m');
 
     ui.stop();
   });

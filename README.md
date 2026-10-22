@@ -225,8 +225,9 @@ errors, and the final answer.
 The code the agent writes is folded away by default. What the transcript
 shows is the step — its name and what it was for — because that is what the
 transcript is for; `ctrl+e` opens the code of the last step and closes it
-again. The code is pretty-printed for the transcript. Formatting is display
-only: what runs is exactly what the model wrote.
+again. The code is pretty-printed and coloured for the terminal, and the
+colouring goes on after the formatting, so it lands on the columns you are
+reading.
 
 ### Scrolling
 

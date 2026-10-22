@@ -11,14 +11,9 @@ import {
   TuiAltScreen,
   VStack,
 } from '@earendil-works/pi-tui';
-import type { CodeFormatter } from '../../domain/ports/format.js';
+import type { CodeFormatter, CodeHighlighter } from '../../domain/ports/format.js';
 import type { UiEvent, UiPort } from '../../domain/ports/ui.js';
-
-const dim = (text: string): string => `\u001b[2m${text}\u001b[0m`;
-const bold = (text: string): string => `\u001b[1m${text}\u001b[0m`;
-const red = (text: string): string => `\u001b[31m${text}\u001b[0m`;
-const green = (text: string): string => `\u001b[32m${text}\u001b[0m`;
-const cyan = (text: string): string => `\u001b[36m${text}\u001b[0m`;
+import { bold, cyan, dim, green, red } from '../format/ansi.js';
 
 const selectListTheme: SelectListTheme = {
   selectedPrefix: (text) => `> ${text}`,
@@ -49,6 +44,8 @@ export interface PiTuiOptions {
   readonly onInterrupt?: () => void;
   /** Pretty-prints the agent's code for display. */
   readonly formatter?: CodeFormatter;
+  /** Colours the agent's code for display. */
+  readonly highlighter?: CodeHighlighter;
 }
 
 /**
@@ -288,7 +285,7 @@ export class PiTuiUi implements UiPort {
 
   #completeStreaming(code: string): void {
     const header = new Text('');
-    const body = new Text(this.#renderCodeBody(this.#format(code)));
+    const body = new Text(this.#renderCodeBody(this.#colour(this.#format(code))));
     const block: CodeBlock = {
       header,
       body,
@@ -379,6 +376,18 @@ export class PiTuiUi implements UiPort {
       return code;
     }
     return formatter.format(code);
+  }
+
+  /**
+   * The colours go on after the formatting, so they land on the columns
+   * the human is reading.
+   */
+  #colour(code: string): string {
+    const highlighter = this.#options.highlighter;
+    if (highlighter === undefined) {
+      return code;
+    }
+    return highlighter.highlight(code);
   }
 
   /**

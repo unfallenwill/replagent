@@ -147,10 +147,11 @@ describe('PiTuiUi', () => {
     void ui.run();
     await tick();
 
+    ui.emit({ type: 'busy', busy: true });
     ui.emit({ type: 'agent-code', text: 'finish("first")' });
-    ui.emit({ type: 'final', text: 'first' });
+    ui.emit({ type: 'busy', busy: false });
+    ui.emit({ type: 'busy', busy: true });
     ui.emit({ type: 'agent-code', text: 'finish("second")' });
-    ui.emit({ type: 'final', text: 'second' });
     await tick();
 
     const screen = plain(terminal.output);
@@ -159,6 +160,38 @@ describe('PiTuiUi', () => {
     // answer "first".
     expect(screen).toContain('finish("first")');
     expect(screen).toContain('finish("second")');
+
+    ui.stop();
+  });
+
+  it('puts the code of the next turn below the error of the previous one', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({ model: 'test-model', terminal });
+
+    void ui.run();
+    await tick();
+
+    // turn 1: the model streams a tool call envelope, so the turn is
+    // rejected and no code event is emitted for it.
+    ui.emit({ type: 'busy', busy: true });
+    ui.emit({ type: 'agent-code-delta', text: '<tool_call>{"name": "fetch"}</tool_call>' });
+    ui.emit({ type: 'repl-error', text: 'You emitted a tool call.' });
+    ui.emit({ type: 'busy', busy: false });
+
+    // turn 2: the model writes code again.
+    ui.emit({ type: 'busy', busy: true });
+    ui.emit({ type: 'agent-code-delta', text: 'console.log("second turn")' });
+    ui.emit({ type: 'agent-code', text: 'console.log("second turn")' });
+    await tick();
+
+    const screen = plain(terminal.output);
+    const errorAt = screen.indexOf('You emitted a tool call.');
+    const codeAt = screen.indexOf('console.log("second turn")');
+
+    expect(errorAt).toBeGreaterThan(-1);
+    expect(codeAt).toBeGreaterThan(-1);
+    // The new code belongs below the error, not above it.
+    expect(codeAt).toBeGreaterThan(errorAt);
 
     ui.stop();
   });

@@ -139,6 +139,12 @@ export class PiTuiUi implements UiPort {
     } else if (event.type === 'agent-code') {
       this.#completeStreaming(event.text);
     } else if (event.type === 'busy') {
+      if (event.busy) {
+        // A new turn starts. The code block belongs to a turn, so the next
+        // turn gets its own - otherwise its code would overwrite the block of
+        // the previous turn and appear above it instead of below.
+        this.#releaseStreamingBlock();
+      }
       this.#setBusy(event.busy);
     } else {
       this.#appendBlock(event);
@@ -251,9 +257,10 @@ export class PiTuiUi implements UiPort {
   #completeStreaming(code: string): void {
     this.#streamingText = code;
     this.#ensureStreaming().setText(this.#renderCode(code, true));
-    // Every turn gets its own code block. Reusing one block would let the
-    // last turn overwrite the code of all earlier turns, so the transcript
-    // would show a finish() call next to a question it never answered.
+    this.#releaseStreamingBlock();
+  }
+
+  #releaseStreamingBlock(): void {
     this.#streaming = undefined;
     this.#streamingText = '';
   }

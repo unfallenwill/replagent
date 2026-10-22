@@ -21,6 +21,16 @@ class ScriptedLlm implements LlmPort {
   }
 }
 
+class FailingLlm implements LlmPort {
+  stream(): AsyncIterable<LlmStreamEvent> {
+    return {
+      [Symbol.asyncIterator]: () => ({
+        next: () => Promise.reject(new DOMException('The operation was aborted.', 'AbortError')),
+      }),
+    };
+  }
+}
+
 class ScriptedRepl implements ReplPort {
   readonly executed: string[] = [];
   readonly #observations: readonly ReplObservation[];
@@ -168,9 +178,6 @@ describe('runAgentTurn', () => {
   });
 
   it('emits a code event for a rejected turn as well', async () => {
-    // The model emits a tool call: the turn is rejected, but the transcript
-    // still has to show what it produced, and the code block has to be
-    // closed - otherwise the next step writes into it.
     const llm = new ScriptedLlm(['<tool_call>{"name": "fetch"}</tool_call>', 'console.log("ok")']);
     const repl = new ScriptedRepl([{ ...noopObservation }]);
     const ui = new RecordingUi();
@@ -192,5 +199,59 @@ describe('runAgentTurn', () => {
     expect(codeTexts[0]).toContain('tool_call');
     expect(codeTexts[1]).toBe('console.log("ok")');
     expect(ui.events.some((event) => event.type === 'repl-error')).toBe(true);
+  });
+
+  it('unwraps a tool call and runs the payload', async () => {
+    const llm = new ScriptedLlm([
+      '<tool_call>{"name": "repl", "input": {"code": "1 + 1"}}</tool_call>',
+    ]);
+    const repl = new ScriptedRepl([{ ...noopObservation, value: '2' }]);
+    const ui = new RecordingUi();
+
+    await runAgentTurn(
+      deps(llm, repl, ui, 2),
+      new Conversation(),
+      'compute',
+      new AbortController().signal,
+    );
+
+    expect(repl.executed).toEqual(['1 + 1']);
+    expect(ui.events).toContainEqual({
+      type: 'status',
+      text: 'Unwrapped a tool-call envelope from the model output.',
+    });
+  });
+
+  it('teaches the model when its reply is not javascript', async () => {
+    const llm = new ScriptedLlm(['Sure! Here is how you do it:']);
+    const repl = new ScriptedRepl([
+      { ...noopObservation, ok: false, error: "SyntaxError: Unexpected identifier 'Sure'" },
+    ]);
+    const ui = new RecordingUi();
+    const conversation = new Conversation();
+
+    await runAgentTurn(deps(llm, repl, ui, 2), conversation, 'do it', new AbortController().signal);
+
+    const observation = conversation.messages[2]?.text ?? '';
+    expect(observation).toContain('was not valid JavaScript');
+  });
+
+  it('stops when the turn is cancelled', async () => {
+    const llm = new FailingLlm();
+    const repl = new ScriptedRepl([]);
+    const ui = new RecordingUi();
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await runAgentTurn(
+      deps(llm, repl, ui),
+      new Conversation(),
+      'do it',
+      controller.signal,
+    );
+
+    expect(result.finished).toBe(false);
+    expect(ui.events).toContainEqual({ type: 'status', text: 'Cancelled.' });
+    expect(ui.events).toContainEqual({ type: 'busy', busy: false });
   });
 });

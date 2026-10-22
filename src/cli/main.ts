@@ -8,6 +8,7 @@ import { runAgentTurn } from '../app/agent.js';
 import { SYSTEM_PROMPT } from '../app/prompt.js';
 import { Conversation } from '../domain/conversation.js';
 import { HELP, parseArgs } from './args.js';
+import { TurnQueue } from './turn-queue.js';
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
@@ -33,6 +34,8 @@ async function main(): Promise<void> {
     ...(options.baseUrl !== undefined ? { baseURL: options.baseUrl } : {}),
   });
 
+  let currentController: AbortController | undefined;
+
   const ui = new PiTuiUi({
     model: options.model,
     endpoint: endpointLabel(client.baseURL),
@@ -48,19 +51,11 @@ async function main(): Promise<void> {
   const repl = new NodeReplSession();
   const conversation = new Conversation();
 
-  const queue: string[] = [];
-  let running = false;
-  let currentController: AbortController | undefined;
-
-  const drain = async (): Promise<void> => {
-    try {
-      while (queue.length > 0) {
-        const next = queue.shift();
-        if (next === undefined) {
-          break;
-        }
-        const controller = new AbortController();
-        currentController = controller;
+  const queue = new TurnQueue(
+    async (text: string) => {
+      const controller = new AbortController();
+      currentController = controller;
+      try {
         await runAgentTurn(
           {
             llm,
@@ -71,25 +66,20 @@ async function main(): Promise<void> {
             maxSteps: options.maxSteps,
           },
           conversation,
-          next,
+          text,
           controller.signal,
         );
+      } finally {
         currentController = undefined;
       }
-    } catch (error) {
+    },
+    (error: unknown) => {
       ui.emit({ type: 'repl-error', text: error instanceof Error ? error.message : String(error) });
-    } finally {
-      running = false;
-    }
-  };
+    },
+  );
 
   ui.onInput((text: string) => {
     queue.push(text);
-    if (running) {
-      return;
-    }
-    running = true;
-    void drain();
   });
 
   process.on('SIGINT', () => {

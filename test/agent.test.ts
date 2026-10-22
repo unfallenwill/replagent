@@ -21,6 +21,13 @@ class ScriptedLlm implements LlmPort {
   }
 }
 
+class MeteredLlm implements LlmPort {
+  async *stream(): AsyncIterable<LlmStreamEvent> {
+    yield { type: 'text', text: '1;' };
+    yield { type: 'done', stopReason: 'end_turn', usage: { input: 120, output: 9, cached: 100 } };
+  }
+}
+
 class FailingLlm implements LlmPort {
   stream(): AsyncIterable<LlmStreamEvent> {
     return {
@@ -249,6 +256,49 @@ describe('runAgentTurn', () => {
 
     const observation = conversation.messages[2]?.text ?? '';
     expect(observation).toContain('was not valid JavaScript');
+  });
+
+  it('reports the turn budget as it is spent', async () => {
+    const llm = new ScriptedLlm(['const a = 1;', 'const b = 2;']);
+    const repl = new ScriptedRepl([{ ...noopObservation }, { ...noopObservation }]);
+    const ui = new RecordingUi();
+
+    await runAgentTurn(
+      deps(llm, repl, ui, 2),
+      new Conversation(),
+      'loop',
+      new AbortController().signal,
+    );
+
+    // The counter exists before the first step does, and rises with each
+    // one: that is what the bar has to show.
+    expect(ui.events.filter((event) => event.type === 'turn-progress')).toEqual([
+      { type: 'turn-progress', steps: 0, maxSteps: 2 },
+      { type: 'turn-progress', steps: 1, maxSteps: 2 },
+      { type: 'turn-progress', steps: 2, maxSteps: 2 },
+    ]);
+    // No reply carried usage, so none is reported.
+    expect(ui.events.some((event) => event.type === 'turn-usage')).toBe(false);
+  });
+
+  it('relays what the model call cost', async () => {
+    const llm = new MeteredLlm();
+    const repl = new ScriptedRepl([
+      { ...noopObservation, value: 'the answer', finalAnswer: 'the answer' },
+    ]);
+    const ui = new RecordingUi();
+
+    await runAgentTurn(
+      deps(llm, repl, ui),
+      new Conversation(),
+      'compute',
+      new AbortController().signal,
+    );
+
+    expect(ui.events).toContainEqual({
+      type: 'turn-usage',
+      usage: { input: 120, output: 9, cached: 100 },
+    });
   });
 
   it('stops when the turn is cancelled', async () => {

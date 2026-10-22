@@ -5,6 +5,8 @@
  * into it. The UI is a pure event sink plus one input channel.
  */
 
+import type { LlmUsage } from './llm.js';
+
 export type UiEvent =
   /** Something the human typed. */
   | { readonly type: 'user-message'; readonly text: string }
@@ -25,7 +27,14 @@ export type UiEvent =
   /** Neutral information about the run (limits, truncation, retries). */
   | { readonly type: 'status'; readonly text: string }
   /** The agent started (or stopped) working on a turn. */
-  | { readonly type: 'busy'; readonly busy: boolean };
+  | { readonly type: 'busy'; readonly busy: boolean }
+  /**
+   * How far the turn has got: steps done against the budget. Emitted once
+   * at the start of a turn with zero steps, and once after each step.
+   */
+  | { readonly type: 'turn-progress'; readonly steps: number; readonly maxSteps: number }
+  /** What the latest model call cost. Arrives when a reply completes. */
+  | { readonly type: 'turn-usage'; readonly usage: LlmUsage };
 
 export interface UiPort {
   emit(event: UiEvent): void;

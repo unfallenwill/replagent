@@ -44,6 +44,9 @@ export async function runAgentTurn(
   conversation.append('user', userText);
   deps.ui.emit({ type: 'user-message', text: userText });
   deps.ui.emit({ type: 'busy', busy: true });
+  // The counter exists before the first step does: the budget is worth
+  // seeing from the moment the turn starts, not after it.
+  deps.ui.emit({ type: 'turn-progress', steps: 0, maxSteps: deps.maxSteps });
 
   let steps = 0;
   let rejections = 0;
@@ -89,6 +92,9 @@ export async function runAgentTurn(
     }
 
     steps += 1;
+    // The step is being worked on now, so n/24 reads "step n of 24" for as
+    // long as the step runs.
+    deps.ui.emit({ type: 'turn-progress', steps, maxSteps: deps.maxSteps });
 
     if (prepared.unwrappedToolCall) {
       deps.ui.emit({
@@ -143,6 +149,9 @@ async function collectCode(
         continue;
       }
       stopReason = event.stopReason;
+      if (event.usage !== undefined) {
+        deps.ui.emit({ type: 'turn-usage', usage: event.usage });
+      }
     }
   } catch (error) {
     if (signal.aborted) {

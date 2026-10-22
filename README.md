@@ -195,7 +195,7 @@ The rules are enforced in `.dependency-cruiser.cjs`:
 | Complexity   | Biome `noExcessiveCognitiveComplexity` | cognitive complexity ≤ 15                                                                                                                                                                                |
 | Architecture | `dependency-cruiser`                   | the layering above                                                                                                                                                                                       |
 | Style        | Biome                                  | formatting and correctness linting                                                                                                                                                                       |
-| Tests        | `vitest`                               | 121 tests, including real `node:repl` integration                                                                                                                                                        |
+| Tests        | `vitest`                               | 160 tests, including real `node:repl` integration                                                                                                                                                        |
 
 Each gate has been verified to actually fail on a violation, not just to
 pass on good code.
@@ -231,12 +231,47 @@ The code the agent writes is folded away by default. What the transcript
 shows is the step — its name and what it was for — because that is what the
 transcript is for. The code, the logs and the value all belong to the step
 that produced them, and they open and close with it: `ctrl+e` opens the
-last step and closes it again. The code is pretty-printed and coloured for
-the terminal, and the colouring goes on after the formatting, so it lands on
-the columns you are reading.
+last step and closes it again. The keystroke's hint sits at the tail of
+the fold itself, on the newest step, and says which way it goes; it leaves
+when the step is no longer the newest one. The code is pretty-printed and
+coloured for the terminal, and the colouring goes on after the formatting,
+so it lands on the columns you are reading.
 
 A step that failed says so in red, even folded away: a transcript that
 hides the failure is a transcript that lies by omission.
+
+### The status bar
+
+The line pinned above the editor is the one thing that never scrolls away.
+On the left, who you are talking to. On the right, what the agent is doing
+and what it costs:
+
+```
+claude-sonnet-4-5 · api.anthropic.com    ⠋ step 7/24 · 45.2k in · 78% cached · 12s · 1.8k out · run vitest
+```
+
+- `step 7/24` is the budget: steps done against `--max-steps`. The count
+  turns yellow as the budget runs out.
+- `45.2k in` is what the last request carried - the whole conversation,
+  system prompt included, cache traffic counted too. That number is the
+  session's real budget: every step sends it again, and it only ever grows.
+- `78% cached` is how much of it the API served from its prompt cache. It
+  appears only when the endpoint reports cache accounting at all: an
+  endpoint that never caches is not an endpoint with a zero percent hit
+  rate.
+- `12s` and `1.8k out` are the age of the turn and its output so far.
+- The last item is the step the agent is on right now, so the run stays
+  readable while you are scrolled away from its newest output.
+
+The bar gives these up in ascending order of importance when the terminal
+is narrow: the step name first, then the output, the seconds, the cache
+rate, the token counts - the step counter is the last to leave, and the
+identity shortens before anything is lost entirely.
+
+When the agent is idle the right side keeps only what the conversation now
+weighs - `45.2k in · 78% cached` - so a glance between turns says where
+the session stands. Before the first request there is nothing to report,
+and the bar is just the identity.
 
 ### Scrolling
 
@@ -282,7 +317,7 @@ replagent --base-url https://gw.example.com/v1 --model glm-4.6
 | `ANTHROPIC_MODEL`      | default model                                           |
 
 Either credential is enough. The resolved endpoint and model are shown in
-the header of the app, so you always know which one you are talking to.
+the status bar of the app, so you always know which one you are talking to.
 
 ## Notes on `node:repl`
 

@@ -21,6 +21,13 @@ export interface AgentTurnResult {
 }
 
 /**
+ * How many times a turn may be rejected for carrying a tool call before the
+ * turn is given up on. The rejection is a transport artefact, but a model
+ * that keeps emitting them is not going to stop on its own.
+ */
+const MAX_TRANSPORT_REJECTIONS = 3;
+
+/**
  * One turn of the agent.
  *
  * The loop is deliberately minimal, because the protocol is minimal: the
@@ -38,16 +45,22 @@ export async function runAgentTurn(
   deps.ui.emit({ type: 'user-message', text: userText });
   deps.ui.emit({ type: 'busy', busy: true });
 
-  for (let step = 1; step <= deps.maxSteps; step += 1) {
+  let steps = 0;
+  let rejections = 0;
+
+  while (steps < deps.maxSteps) {
     const raw = await collectCode(deps, conversation, signal);
     if (raw === undefined) {
       deps.ui.emit({ type: 'busy', busy: false });
-      return { steps: step - 1, finished: false };
+      return { steps, finished: false };
     }
 
     const prepared = prepareModelOutput(raw);
 
+    // A tool call is a transport artefact, not a reasoning failure: it does
+    // not cost the agent a step of its budget, it only costs a round trip.
     if (prepared.problem !== undefined) {
+      rejections += 1;
       deps.ui.emit({ type: 'repl-error', text: prepared.problem });
       conversation.append('assistant', prepared.code);
       conversation.append(
@@ -60,8 +73,17 @@ export async function runAgentTurn(
           finalAnswer: undefined,
         }),
       );
+      if (rejections >= MAX_TRANSPORT_REJECTIONS) {
+        deps.ui.emit({
+          type: 'status',
+          text: `Stopped: the model kept emitting tool calls (${rejections} times).`,
+        });
+        break;
+      }
       continue;
     }
+
+    steps += 1;
 
     if (prepared.unwrappedToolCall) {
       deps.ui.emit({
@@ -81,7 +103,7 @@ export async function runAgentTurn(
     if (observation.finalAnswer !== undefined) {
       deps.ui.emit({ type: 'final', text: observation.finalAnswer });
       deps.ui.emit({ type: 'busy', busy: false });
-      return { steps: step, finished: true };
+      return { steps, finished: true };
     }
   }
 

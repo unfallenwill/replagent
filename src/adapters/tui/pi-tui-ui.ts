@@ -7,7 +7,7 @@ import {
   type SelectListTheme,
   type Terminal,
   Text,
-  TuiMainScreen,
+  TuiAltScreen,
   VStack,
 } from '@earendil-works/pi-tui';
 import type { UiEvent, UiPort } from '../../domain/ports/ui.js';
@@ -31,6 +31,9 @@ const editorTheme: EditorTheme = {
   selectList: selectListTheme,
 };
 
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const SPINNER_INTERVAL_MS = 80;
+
 export interface PiTuiOptions {
   readonly model: string;
   /** Terminal to render on. Defaults to the process terminal. */
@@ -45,9 +48,14 @@ export interface PiTuiOptions {
  * Everything the agent does shows up here: the JavaScript it writes, what the
  * REPL logged, what the last expression evaluated to, and the errors it has
  * to work through. The human types at the bottom.
+ *
+ * The renderer is the alternate screen: it owns a viewport, so the transcript
+ * scrolls inside the window while the editor stays pinned at the bottom. The
+ * plain main screen has no layout engine, and a scroll view inside it would
+ * silently render nothing.
  */
 export class PiTuiUi implements UiPort {
-  readonly #tui: TuiMainScreen;
+  readonly #tui: TuiAltScreen;
   readonly #document: Container;
   readonly #editor: Editor;
   readonly #status: Text;
@@ -56,9 +64,14 @@ export class PiTuiUi implements UiPort {
   #inputHandler: ((text: string) => void) | undefined;
   #done: (() => void) | undefined;
   #stopped = false;
+  #busy = false;
+  #spinnerTimer: NodeJS.Timeout | undefined;
+  #spinnerFrame = 0;
 
   constructor(options: PiTuiOptions) {
-    this.#tui = new TuiMainScreen(options.terminal ?? new ProcessTerminal());
+    this.#tui = new TuiAltScreen(options.terminal ?? new ProcessTerminal(), true, undefined, {
+      mouse: false,
+    });
     this.#document = new Container();
     this.#status = new Text('');
     this.#editor = new Editor(this.#tui, editorTheme);
@@ -87,7 +100,7 @@ export class PiTuiUi implements UiPort {
       { component: dock, basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
     ]);
 
-    this.#tui.addChild(root);
+    this.#tui.setLayoutRoot(root);
     this.#tui.setFocus(this.#editor);
   }
 
@@ -96,6 +109,8 @@ export class PiTuiUi implements UiPort {
       this.#appendStreaming(event.text);
     } else if (event.type === 'agent-code') {
       this.#completeStreaming(event.text);
+    } else if (event.type === 'busy') {
+      this.#setBusy(event.busy);
     } else {
       this.#appendBlock(event);
     }
@@ -119,6 +134,7 @@ export class PiTuiUi implements UiPort {
 
   stop(): void {
     this.#stopped = true;
+    this.#stopSpinner();
     const done = this.#done;
     this.#done = undefined;
     done?.();
@@ -137,7 +153,9 @@ export class PiTuiUi implements UiPort {
     this.#inputHandler?.(trimmed);
   }
 
-  #appendBlock(event: Exclude<UiEvent, { type: 'agent-code-delta' | 'agent-code' }>): void {
+  #appendBlock(
+    event: Exclude<UiEvent, { type: 'agent-code-delta' | 'agent-code' | 'busy' }>,
+  ): void {
     switch (event.type) {
       case 'user-message':
         this.#document.addChild(new Text(`\n${bold(cyan('you'))} ${event.text}`));
@@ -162,22 +180,21 @@ export class PiTuiUi implements UiPort {
 
   #appendStreaming(delta: string): void {
     this.#streamingText += delta;
-    if (this.#streaming === undefined) {
-      this.#streaming = new Text('');
-      this.#document.addChild(this.#streaming);
-    }
-    this.#streaming.setText(this.#renderCode(this.#streamingText));
-    this.#streaming.invalidate();
+    this.#ensureStreaming().setText(this.#renderCode(this.#streamingText));
   }
 
   #completeStreaming(code: string): void {
     this.#streamingText = code;
+    this.#ensureStreaming().setText(this.#renderCode(code));
+  }
+
+  #ensureStreaming(): Text {
     if (this.#streaming === undefined) {
       this.#streaming = new Text('');
       this.#document.addChild(this.#streaming);
     }
-    this.#streaming.setText(this.#renderCode(code));
     this.#streaming.invalidate();
+    return this.#streaming;
   }
 
   #renderCode(code: string): string {
@@ -186,5 +203,40 @@ export class PiTuiUi implements UiPort {
       .map((line) => `${dim('│')} ${line}`)
       .join('\n');
     return `\n${dim('js')}\n${body}`;
+  }
+
+  /**
+   * The busy indicator is the answer to "did my message even go out?": as
+   * soon as the agent starts working, the status line shows a spinner, and it
+   * stops when the turn is over.
+   */
+  #setBusy(busy: boolean): void {
+    this.#busy = busy;
+    if (!busy) {
+      this.#stopSpinner();
+      this.#status.setText('');
+      return;
+    }
+    if (this.#spinnerTimer !== undefined) {
+      return;
+    }
+    this.#spinnerTimer = setInterval(() => {
+      const frame = SPINNER_FRAMES[this.#spinnerFrame % SPINNER_FRAMES.length] ?? '';
+      this.#spinnerFrame += 1;
+      this.#status.setText(`${cyan(frame)} ${dim('working…')}`);
+      this.#tui.requestRender();
+    }, SPINNER_INTERVAL_MS);
+    this.#spinnerTimer.unref();
+  }
+
+  #stopSpinner(): void {
+    if (this.#spinnerTimer !== undefined) {
+      clearInterval(this.#spinnerTimer);
+      this.#spinnerTimer = undefined;
+    }
+    if (this.#busy) {
+      this.#busy = false;
+      this.#status.setText('');
+    }
   }
 }

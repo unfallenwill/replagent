@@ -100,6 +100,16 @@ Options:
 
 In the app: `/quit` leaves.
 
+### Feedback
+
+The transcript is a scrollable viewport (alternate screen) with the editor
+pinned at the bottom. Everything the agent does appears there: your own
+message is echoed, the JavaScript it writes, what the REPL logged, the value
+of the last expression, the errors, and the final answer.
+
+While the agent is working the status line shows a spinner, so it is always
+clear that a message went out and is being worked on.
+
 ### Pointing it at a gateway
 
 Precedence is always **flag > environment > default**:

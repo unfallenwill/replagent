@@ -34,10 +34,12 @@ export async function runAgentTurn(
 ): Promise<AgentTurnResult> {
   conversation.append('user', userText);
   deps.ui.emit({ type: 'user-message', text: userText });
+  deps.ui.emit({ type: 'busy', busy: true });
 
   for (let step = 1; step <= deps.maxSteps; step += 1) {
     const code = await collectCode(deps, conversation, signal);
     if (code === undefined) {
+      deps.ui.emit({ type: 'busy', busy: false });
       return { steps: step - 1, finished: false };
     }
 
@@ -50,11 +52,13 @@ export async function runAgentTurn(
 
     if (observation.finalAnswer !== undefined) {
       deps.ui.emit({ type: 'final', text: observation.finalAnswer });
+      deps.ui.emit({ type: 'busy', busy: false });
       return { steps: step, finished: true };
     }
   }
 
   deps.ui.emit({ type: 'status', text: `Stopped: reached the limit of ${deps.maxSteps} steps.` });
+  deps.ui.emit({ type: 'busy', busy: false });
   return { steps: deps.maxSteps, finished: false };
 }
 

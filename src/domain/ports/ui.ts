@@ -21,7 +21,9 @@ export type UiEvent =
   /** The agent called `finish(...)`. */
   | { readonly type: 'final'; readonly text: string }
   /** Neutral information about the run (limits, truncation, retries). */
-  | { readonly type: 'status'; readonly text: string };
+  | { readonly type: 'status'; readonly text: string }
+  /** The agent started (or stopped) working on a turn. */
+  | { readonly type: 'busy'; readonly busy: boolean };
 
 export interface UiPort {
   emit(event: UiEvent): void;

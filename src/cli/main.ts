@@ -34,15 +34,6 @@ async function main(): Promise<void> {
   const queue: string[] = [];
   let running = false;
 
-  ui.onInput((text: string) => {
-    queue.push(text);
-    if (running) {
-      return;
-    }
-    running = true;
-    void drain();
-  });
-
   const drain = async (): Promise<void> => {
     try {
       while (queue.length > 0) {
@@ -70,6 +61,15 @@ async function main(): Promise<void> {
       running = false;
     }
   };
+
+  ui.onInput((text: string) => {
+    queue.push(text);
+    if (running) {
+      return;
+    }
+    running = true;
+    void drain();
+  });
 
   process.on('SIGINT', () => {
     controller.abort();

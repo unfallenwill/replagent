@@ -52,13 +52,19 @@ export async function runAgentTurn(
   let rejections = 0;
 
   while (steps < deps.maxSteps) {
-    const raw = await collectCode(deps, conversation, signal);
-    if (raw === undefined) {
+    const reply = await collectCode(deps, conversation, signal);
+    if (reply === undefined) {
       deps.ui.emit({ type: 'busy', busy: false });
       return { steps, finished: false };
     }
 
-    const prepared = prepareModelOutput(raw);
+    // The reasoning came first, so the transcript gets it first - on the
+    // rejected path too: it happened, even if what it produced is wrong.
+    if (reply.thinking.length > 0) {
+      deps.ui.emit({ type: 'agent-thinking', text: reply.thinking });
+    }
+
+    const prepared = prepareModelOutput(reply.code);
 
     // A tool call is a transport artefact, not a reasoning failure: it does
     // not cost the agent a step of its budget, it only costs a round trip.
@@ -123,6 +129,12 @@ export async function runAgentTurn(
   return { steps: deps.maxSteps, finished: false };
 }
 
+/** What one reply carried: the reasoning that led to it, and the program. */
+interface AgentReply {
+  readonly code: string;
+  readonly thinking: string;
+}
+
 /**
  * Ask the model for its next program. Returns `undefined` when the turn was
  * cancelled.
@@ -131,7 +143,7 @@ async function collectCode(
   deps: AgentDeps,
   conversation: Conversation,
   signal: AbortSignal,
-): Promise<string | undefined> {
+): Promise<AgentReply | undefined> {
   const request: LlmRequest = {
     system: deps.systemPrompt,
     messages: conversation.messages,
@@ -139,6 +151,7 @@ async function collectCode(
   };
 
   let code = '';
+  let thinking = '';
   let stopReason: LlmStopReason = 'other';
 
   try {
@@ -146,6 +159,11 @@ async function collectCode(
       if (event.type === 'text') {
         code += event.text;
         deps.ui.emit({ type: 'agent-code-delta', text: event.text });
+        continue;
+      }
+      if (event.type === 'thinking') {
+        thinking += event.text;
+        deps.ui.emit({ type: 'agent-thinking-delta' });
         continue;
       }
       stopReason = event.stopReason;
@@ -165,7 +183,7 @@ async function collectCode(
     deps.ui.emit({ type: 'status', text: 'The reply was cut off (max_tokens reached).' });
   }
 
-  return code;
+  return { code, thinking };
 }
 
 /**

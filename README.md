@@ -195,7 +195,7 @@ The rules are enforced in `.dependency-cruiser.cjs`:
 | Complexity   | Biome `noExcessiveCognitiveComplexity` | cognitive complexity ≤ 15                                                                                                                                                                                |
 | Architecture | `dependency-cruiser`                   | the layering above                                                                                                                                                                                       |
 | Style        | Biome                                  | formatting and correctness linting                                                                                                                                                                       |
-| Tests        | `vitest`                               | 160 tests, including real `node:repl` integration                                                                                                                                                        |
+| Tests        | `vitest`                               | 168 tests, including real `node:repl` integration                                                                                                                                                        |
 
 Each gate has been verified to actually fail on a violation, not just to
 pass on good code.
@@ -240,6 +240,27 @@ so it lands on the columns you are reading.
 A step that failed says so in red, even folded away: a transcript that
 hides the failure is a transcript that lies by omission.
 
+### The reasoning
+
+A model that thinks before it answers produces that reasoning first, and
+the transcript keeps it first: it is its own fold, above the step, because
+that is the order it happened in - and the step's name was chosen inside
+it. Shut (the default), it reports only what it cost:
+
+```
+▶ Thought 1.2k chars · 12s   · ctrl+o opens the thinking
+▶ scan the failing test - run vitest and read the report   · ctrl+e opens the step
+```
+
+`ctrl+o` opens it, and the words are dim behind a dotted gutter - the ghost
+of the code, not the code. Reading the reasoning and reading the code are
+different things, so they are different keys. A reply with no reasoning
+adds no fold at all, and while the model is thinking the status bar says
+`thinking` in the place the current step will take.
+
+The reasoning is not part of the conversation sent back to the model: it
+is the human's window into how the step was chosen.
+
 ### The status bar
 
 The line pinned above the editor is the one thing that never scrolls away.
@@ -280,7 +301,8 @@ terminal turns the wheel into cursor keys, and the editor walks through its
 input history instead). Selecting text with the mouse copies it.
 
 Keyboard: `pageUp` / `pageDown`, `ctrl+home` / `ctrl+end`, `ctrl+f` to
-search the transcript, `ctrl+e` to open and close the code of the last step.
+search the transcript, `ctrl+e` to open and close the code of the last
+step, `ctrl+o` to do the same for its reasoning.
 
 ### Leaving
 

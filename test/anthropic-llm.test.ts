@@ -68,21 +68,44 @@ describe('AnthropicLlm', () => {
     expect(texts.join('')).toBe('const a = 1;');
   });
 
-  it('ignores thinking deltas', async () => {
+  it('streams thinking deltas as reasoning, before the code', async () => {
     const { client } = fakeClient([
       { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'hmm' } },
       { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } },
     ]);
     const llm = new AnthropicLlm({ client, model: 'test-model' });
 
-    const texts: string[] = [];
+    const events: string[] = [];
     for await (const event of llm.stream(request, new AbortController().signal)) {
-      if (event.type === 'text') {
-        texts.push(event.text);
+      if (event.type === 'thinking') {
+        events.push(`thinking: ${event.text}`);
+      } else if (event.type === 'text') {
+        events.push(`text: ${event.text}`);
       }
     }
 
-    expect(texts).toEqual(['ok']);
+    // The reasoning is not dropped: it reaches the UI, in the order it
+    // happened.
+    expect(events).toEqual(['thinking: hmm', 'text: ok']);
+  });
+
+  it('ignores a thinking signature delta', async () => {
+    const { client } = fakeClient([
+      {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'signature_delta', signature: 'abc' },
+      },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } },
+    ]);
+    const llm = new AnthropicLlm({ client, model: 'test-model' });
+
+    const events: string[] = [];
+    for await (const event of llm.stream(request, new AbortController().signal)) {
+      events.push(event.type);
+    }
+
+    expect(events).toEqual(['text', 'done']);
   });
 
   it('reports the stop reason', async () => {

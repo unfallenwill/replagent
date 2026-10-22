@@ -14,6 +14,13 @@ export type UiEvent =
   | { readonly type: 'agent-code-delta'; readonly text: string }
   /** The complete JavaScript of one turn. */
   | { readonly type: 'agent-code'; readonly text: string }
+  /**
+   * The reasoning that came before the reply. Arrives before `agent-code`,
+   * because that is the order it happened in.
+   */
+  | { readonly type: 'agent-thinking'; readonly text: string }
+  /** A chunk of the reasoning, as it is being written. */
+  | { readonly type: 'agent-thinking-delta' }
   /** The step that ran: the name the agent gave it and what it was for. */
   | { readonly type: 'step'; readonly name: string; readonly description: string }
   /** A line the agent's code logged. */

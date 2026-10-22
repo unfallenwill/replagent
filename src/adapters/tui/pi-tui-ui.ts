@@ -51,6 +51,20 @@ const MIN_IDENTITY = 8;
 const MIN_GAP = 2;
 
 /**
+ * The reasoning, as the terminal reads it.
+ *
+ * Dim, and behind a dotted gutter: it is the ghost of the code, not the
+ * code. The dotted line is how the eye tells the two apart without reading
+ * a word, and it survives the colour being turned off.
+ */
+function thinkingBody(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => `${dim('┆')} ${dim(line)}`)
+    .join('\n');
+}
+
+/**
  * A token count as a person reads it: `980`, `9.8k`, `45.2k`, `180k`.
  */
 function formatTokens(count: number): string {
@@ -80,7 +94,12 @@ function formatElapsed(startedAt: number | undefined): string {
   if (startedAt === undefined) {
     return '';
   }
-  const seconds = Math.floor((Date.now() - startedAt) / 1000);
+  return formatSeconds(Date.now() - startedAt);
+}
+
+/** A duration in milliseconds, as a person reads it: `7s`, then `3m07s`. */
+function formatSeconds(duration: number): string {
+  const seconds = Math.floor(duration / 1000);
   if (seconds < 60) {
     return `${seconds}s`;
   }
@@ -133,6 +152,20 @@ interface StepBlock {
   failed: boolean;
 }
 
+/**
+ * The reasoning that came before a reply.
+ *
+ * It is its own fold, above the step, because that is the order it happened
+ * in - and the step's name was chosen inside it. Folded, it reports only
+ * what it cost: how much and how long. The words are one keystroke away.
+ */
+interface ThoughtBlock {
+  readonly header: Text;
+  readonly body: Text;
+  readonly group: Container;
+  expanded: boolean;
+}
+
 export class PiTuiUi implements UiPort {
   readonly #tui: TuiAltScreen;
   readonly #document: Container;
@@ -161,6 +194,13 @@ export class PiTuiUi implements UiPort {
   /** The step the agent is on right now - gone as soon as the next reply starts. */
   #currentStep: string | undefined;
   #turnStartedAt: number | undefined;
+  #thought: ThoughtBlock | undefined;
+  /** What the newest thought cost: its size and how long it took. */
+  #thoughtCost: { readonly chars: number; readonly elapsed: number } | undefined;
+  /** When the current reply's reasoning first arrived. */
+  #thoughtStartedAt: number | undefined;
+  /** Whether the model is reasoning right now, rather than writing. */
+  #thinking = false;
 
   constructor(options: PiTuiOptions) {
     this.#options = options;
@@ -227,6 +267,17 @@ export class PiTuiUi implements UiPort {
       this.#toggleLatestStep();
       return { consume: true };
     });
+
+    // ctrl+o does the same for the reasoning that came before it. Reading
+    // the thinking and reading the code are different things, so they are
+    // different keys.
+    this.#tui.addInputListener((data) => {
+      if (!matchesKey(data, 'ctrl+o')) {
+        return undefined;
+      }
+      this.#toggleLatestThought();
+      return { consume: true };
+    });
   }
 
   emit(event: UiEvent): void {
@@ -234,26 +285,18 @@ export class PiTuiUi implements UiPort {
       // A new reply is being written, and the step it belongs to has no name
       // yet: whatever the bar showed for the previous step is stale now.
       this.#currentStep = undefined;
+      this.#thinking = false;
       this.#appendStreaming(event.text);
     } else if (event.type === 'agent-code') {
       this.#completeStreaming(event.text);
+    } else if (event.type === 'agent-thinking-delta') {
+      this.#startThinking();
+    } else if (event.type === 'agent-thinking') {
+      this.#completeThinking(event.text);
     } else if (event.type === 'step') {
       this.#labelStep(event.name, event.description);
     } else if (event.type === 'busy') {
-      if (event.busy) {
-        // A new turn starts. The code block belongs to a turn, so the next
-        // turn gets its own - and a step that arrives late must not label
-        // the block of the turn that follows it.
-        this.#relabel(this.#block, false);
-        this.#block = undefined;
-        this.#turnSteps = 0;
-        this.#turnOutput = 0;
-        this.#currentStep = undefined;
-        this.#turnStartedAt = Date.now();
-      } else {
-        this.#turnStartedAt = undefined;
-      }
-      this.#setBusy(event.busy);
+      this.#applyBusy(event.busy);
     } else if (event.type === 'turn-progress') {
       this.#turnSteps = event.steps;
       this.#maxSteps = event.maxSteps;
@@ -264,6 +307,25 @@ export class PiTuiUi implements UiPort {
       this.#appendBlock(event);
     }
     this.#tui.requestRender();
+  }
+
+  #applyBusy(busy: boolean): void {
+    if (busy) {
+      // A new turn starts. The code block belongs to a turn, so the next
+      // turn gets its own - and a step that arrives late must not label
+      // the block of the turn that follows it.
+      this.#relabel(this.#block, false);
+      this.#block = undefined;
+      this.#relabelThought(false);
+      this.#thought = undefined;
+      this.#turnSteps = 0;
+      this.#turnOutput = 0;
+      this.#currentStep = undefined;
+      this.#turnStartedAt = Date.now();
+    } else {
+      this.#turnStartedAt = undefined;
+    }
+    this.#setBusy(busy);
   }
 
   onInput(handler: (text: string) => void): void {
@@ -368,7 +430,14 @@ export class PiTuiUi implements UiPort {
   }
 
   #appendBlock(
-    event: Exclude<UiEvent, { type: 'agent-code-delta' | 'agent-code' | 'busy' }>,
+    event: Exclude<
+      UiEvent,
+      | { type: 'agent-code-delta' }
+      | { type: 'agent-code' }
+      | { type: 'agent-thinking-delta' }
+      | { type: 'agent-thinking' }
+      | { type: 'busy' }
+    >,
   ): void {
     switch (event.type) {
       case 'user-message':
@@ -415,6 +484,86 @@ export class PiTuiUi implements UiPort {
   #appendStreaming(_delta: string): void {
     // The step is folded away, so there is nothing to show while it is
     // being written: the title it turns out to be says more than the code.
+  }
+
+  /** The model has started reasoning; the bar says so until it starts writing. */
+  #startThinking(): void {
+    if (!this.#thinking) {
+      this.#thinking = true;
+      this.#thoughtStartedAt = Date.now();
+    }
+  }
+
+  /**
+   * The reasoning arrived, complete.
+   *
+   * It becomes its own fold, above the step that follows it - the order it
+   * happened in, and the place the step's name came from. Shut, it reports
+   * what it cost; the words are on ctrl+o.
+   */
+  #completeThinking(text: string): void {
+    const elapsed = this.#thoughtStartedAt === undefined ? 0 : Date.now() - this.#thoughtStartedAt;
+    this.#thinking = false;
+    this.#thoughtStartedAt = undefined;
+
+    // ctrl+o follows the newest thought, so the previous one gives up the
+    // hint first.
+    this.#relabelThought(false);
+
+    const header = new Text('');
+    const group = new Container();
+    group.addChild(header);
+
+    const block: ThoughtBlock = {
+      header,
+      body: new Text(thinkingBody(text)),
+      group,
+      expanded: false,
+    };
+
+    this.#document.addChild(group);
+    this.#thought = block;
+    this.#thoughtCost = { chars: text.length, elapsed };
+    this.#relabelThought(true);
+  }
+
+  #toggleThought(block: ThoughtBlock): void {
+    block.expanded = !block.expanded;
+    if (block.expanded) {
+      block.group.addChild(block.body);
+    } else {
+      block.group.removeChild(block.body);
+    }
+    this.#relabelThought(true);
+    this.#tui.requestRender();
+  }
+
+  #toggleLatestThought(): void {
+    const block = this.#thought;
+    if (block !== undefined) {
+      this.#toggleThought(block);
+    }
+  }
+
+  /** The thought's header: what it cost, and whether it is open. */
+  #thoughtLabel(expanded: boolean, latest: boolean): string {
+    const marker = expanded ? cyan('▼') : dim('▶');
+    const cost = this.#thoughtCost;
+    const seconds = cost === undefined ? '' : ` · ${formatSeconds(cost.elapsed)}`;
+    const size = cost === undefined ? '' : ` ${formatTokens(cost.chars)} chars`;
+    const title = `${marker} ${dim(`Thought${size}${seconds}`)}`;
+    if (!latest) {
+      return title;
+    }
+    const hint = expanded ? 'ctrl+o closes the thinking' : 'ctrl+o opens the thinking';
+    return `${title}   ${dim(`· ${hint}`)}`;
+  }
+
+  #relabelThought(latest: boolean): void {
+    const block = this.#thought;
+    if (block !== undefined) {
+      block.header.setText(this.#thoughtLabel(block.expanded, latest));
+    }
   }
 
   #completeStreaming(code: string): void {
@@ -640,8 +789,11 @@ export class PiTuiUi implements UiPort {
       }
       items.push(dim(`${formatTokens(this.#turnOutput)} out`));
     }
-    if (this.#busy && this.#currentStep !== undefined) {
-      items.push(dim(this.#currentStep));
+    if (this.#busy) {
+      const working = this.#thinking ? 'thinking' : this.#currentStep;
+      if (working !== undefined) {
+        items.push(dim(working));
+      }
     }
     return items;
   }

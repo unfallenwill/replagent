@@ -8,15 +8,21 @@ import type { UiEvent, UiPort } from '../src/domain/ports/ui.js';
 class ScriptedLlm implements LlmPort {
   readonly requests: LlmRequest[] = [];
   readonly #replies: readonly string[];
+  readonly #thinking: readonly string[];
 
-  constructor(replies: readonly string[]) {
+  constructor(replies: readonly string[], thinking: readonly string[] = []) {
     this.#replies = replies;
+    this.#thinking = thinking;
   }
 
   async *stream(request: LlmRequest): AsyncIterable<LlmStreamEvent> {
     this.requests.push(request);
-    const reply = this.#replies[this.requests.length - 1] ?? '';
-    yield { type: 'text', text: reply };
+    const index = this.requests.length - 1;
+    const thinking = this.#thinking[index] ?? '';
+    if (thinking.length > 0) {
+      yield { type: 'thinking', text: thinking };
+    }
+    yield { type: 'text', text: this.#replies[index] ?? '' };
     yield { type: 'done', stopReason: 'end_turn' };
   }
 }
@@ -299,6 +305,64 @@ describe('runAgentTurn', () => {
       type: 'turn-usage',
       usage: { input: 120, output: 9, cached: 100 },
     });
+  });
+
+  it('reports the reasoning before the code, in the order it happened', async () => {
+    const llm = new ScriptedLlm(['finish("done")'], ['the answer is in the file']);
+    const repl = new ScriptedRepl([{ ...noopObservation, value: 'done', finalAnswer: 'done' }]);
+    const ui = new RecordingUi();
+
+    await runAgentTurn(
+      deps(llm, repl, ui),
+      new Conversation(),
+      'do it',
+      new AbortController().signal,
+    );
+
+    const kinds = ui.events.map((event) => event.type);
+    const thinking = kinds.indexOf('agent-thinking');
+    const code = kinds.indexOf('agent-code');
+
+    expect(ui.events).toContainEqual({ type: 'agent-thinking', text: 'the answer is in the file' });
+    expect(kinds).toContain('agent-thinking-delta');
+    expect(thinking).toBeGreaterThan(-1);
+    expect(code).toBeGreaterThan(thinking);
+  });
+
+  it('reports the reasoning of a reply that was rejected too', async () => {
+    const llm = new ScriptedLlm(
+      ['<tool_call>{"name": "fetch"}</tool_call>'],
+      ['I could just fetch this'],
+    );
+    const ui = new RecordingUi();
+
+    await runAgentTurn(
+      deps(llm, new ScriptedRepl([]), ui, 1),
+      new Conversation(),
+      'do it',
+      new AbortController().signal,
+    );
+
+    // The thought happened, even though what it produced is not runnable.
+    expect(ui.events).toContainEqual({
+      type: 'agent-thinking',
+      text: 'I could just fetch this',
+    });
+  });
+
+  it('reports no reasoning when the model did not think', async () => {
+    const llm = new ScriptedLlm(['finish("done")']);
+    const ui = new RecordingUi();
+
+    await runAgentTurn(
+      deps(llm, new ScriptedRepl([{ ...noopObservation, finalAnswer: 'done' }]), ui),
+      new Conversation(),
+      'do it',
+      new AbortController().signal,
+    );
+
+    expect(ui.events.some((event) => event.type === 'agent-thinking')).toBe(false);
+    expect(ui.events.some((event) => event.type === 'agent-thinking-delta')).toBe(false);
   });
 
   it('stops when the turn is cancelled', async () => {

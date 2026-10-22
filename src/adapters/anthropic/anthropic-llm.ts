@@ -48,6 +48,10 @@ export class AnthropicLlm implements LlmPort {
         yield { type: 'text', text: event.delta.text };
         continue;
       }
+      if (event.type === 'content_block_delta' && event.delta.type === 'thinking_delta') {
+        yield { type: 'thinking', text: event.delta.thinking };
+        continue;
+      }
       const done = tracker.read(event);
       if (done !== undefined) {
         yield done;

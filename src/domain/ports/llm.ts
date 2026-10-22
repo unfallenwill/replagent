@@ -39,6 +39,8 @@ export interface LlmUsage {
 
 export type LlmStreamEvent =
   | { readonly type: 'text'; readonly text: string }
+  /** A chunk of the model's reasoning, when the model exposes it. */
+  | { readonly type: 'thinking'; readonly text: string }
   | { readonly type: 'done'; readonly stopReason: LlmStopReason; readonly usage?: LlmUsage };
 
 export interface LlmPort {

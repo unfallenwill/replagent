@@ -183,6 +183,107 @@ describe('PiTuiUi', () => {
     ui.stop();
   });
 
+  it('folds the reasoning above the step, reporting only what it cost', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({ model: 'test-model', terminal });
+
+    void ui.run();
+    await tick();
+
+    ui.emit({ type: 'busy', busy: true });
+    ui.emit({ type: 'agent-thinking-delta' });
+    ui.emit({ type: 'agent-thinking', text: 'The snapshot expects the old module count.' });
+    ui.emit({ type: 'agent-code', text: 'const a = 1;' });
+    ui.emit({ type: 'step', name: 'look around', description: 'see what is here' });
+    await tick();
+
+    const lines = ui.transcriptText.split('\n');
+    const thoughtAt = lines.findIndex((line) => line.includes('Thought'));
+    const stepAt = lines.findIndex((line) => line.includes('look around'));
+    const thought = lines[thoughtAt] ?? '';
+
+    expect(thought).toContain('Thought 42 chars');
+    expect(thought).toContain('ctrl+o opens the thinking');
+    // The thinking came first, and it is where it happened: above the step.
+    expect(thoughtAt).toBeGreaterThan(-1);
+    expect(thoughtAt).toBeLessThan(stepAt);
+    // Shut, it reports its cost, not its words.
+    expect(ui.transcriptText).not.toContain('The snapshot expects the old module count.');
+
+    ui.stop();
+  });
+
+  it('shows the reasoning when it is asked for', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({ model: 'test-model', terminal });
+
+    void ui.run();
+    await tick();
+
+    ui.emit({ type: 'busy', busy: true });
+    ui.emit({ type: 'agent-thinking-delta' });
+    ui.emit({ type: 'agent-thinking', text: 'The snapshot expects the old module count.' });
+    ui.emit({ type: 'agent-code', text: 'const a = 1;' });
+    ui.emit({ type: 'step', name: 'look around', description: 'see what is here' });
+    await tick();
+
+    // ctrl+o is the reasoning's own key: it must not open the code.
+    terminal.onInput?.('\x0f');
+    await tick(120);
+
+    const opened = ui.transcriptText;
+    expect(opened).toContain('The snapshot expects the old module count.');
+    expect(opened).toContain('ctrl+o closes the thinking');
+    expect(opened).not.toContain('const a = 1;');
+
+    ui.stop();
+  });
+
+  it('takes the thinking hint back when a newer thought arrives', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({ model: 'test-model', terminal });
+
+    void ui.run();
+    await tick();
+
+    ui.emit({ type: 'busy', busy: true });
+    ui.emit({ type: 'agent-thinking-delta' });
+    ui.emit({ type: 'agent-thinking', text: 'first thought' });
+    ui.emit({ type: 'agent-code', text: 'const a = 1;' });
+    ui.emit({ type: 'agent-thinking-delta' });
+    ui.emit({ type: 'agent-thinking', text: 'second thought' });
+    ui.emit({ type: 'agent-code', text: 'const b = 2;' });
+    await tick();
+
+    const lines = ui.transcriptText.split('\n').filter((line) => line.includes('Thought'));
+    expect(lines).toHaveLength(2);
+    // The keystroke follows the newest thought only.
+    expect(lines[0]).not.toContain('ctrl+o');
+    expect(lines[1]).toContain('ctrl+o opens the thinking');
+
+    ui.stop();
+  });
+
+  it('says the model is thinking before it writes anything', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({ model: 'test-model', terminal });
+
+    void ui.run();
+    await tick();
+
+    ui.emit({ type: 'busy', busy: true });
+    ui.emit({ type: 'turn-progress', steps: 1, maxSteps: 24 });
+    ui.emit({ type: 'agent-thinking-delta' });
+
+    expect(plain(ui.statusBarText)).toContain('thinking');
+
+    // Once the code arrives, the bar is about the step again.
+    ui.emit({ type: 'agent-code-delta', text: 'const a' });
+    expect(plain(ui.statusBarText)).not.toContain('thinking');
+
+    ui.stop();
+  });
+
   it('shows the code when the step is asked for', async () => {
     const terminal = new FakeTerminal();
     const ui = new PiTuiUi({ model: 'test-model', terminal });

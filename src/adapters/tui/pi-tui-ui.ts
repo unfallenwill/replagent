@@ -269,7 +269,7 @@ export class PiTuiUi implements UiPort {
         this.#document.addChild(new Text(`${red('  error')} ${event.text}`));
         return;
       case 'final':
-        this.#document.addChild(new Text(`\n${bold('answer')} ${event.text}`));
+        this.#document.addChild(new Text(`\n${event.text}`));
         return;
       case 'status':
         this.#statusText = event.text;

@@ -11,13 +11,13 @@ produces is a program, executed verbatim in a persistent REPL. What it logs
 and what its last expression evaluates to is all it ever learns.
 
 ```
-you ▸ how many files are in this directory?
+you how many files are in this directory?
 
 ▶ count the files - read the directory and count what is in it
    log   scanning
    =>    42
 
-answer ▸ There are 42 files in this directory.
+There are 42 files in this directory.
 ```
 
 ## The protocol

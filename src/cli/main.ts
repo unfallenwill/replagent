@@ -16,15 +16,25 @@ async function main(): Promise<void> {
   }
 
   const apiKey = process.env['ANTHROPIC_API_KEY'];
-  if (apiKey === undefined || apiKey.trim().length === 0) {
-    process.stderr.write('ANTHROPIC_API_KEY is not set.\n');
+  const authToken = process.env['ANTHROPIC_AUTH_TOKEN'];
+  const hasApiKey = apiKey !== undefined && apiKey.trim().length > 0;
+  const hasAuthToken = authToken !== undefined && authToken.trim().length > 0;
+
+  if (!hasApiKey && !hasAuthToken) {
+    process.stderr.write('Neither ANTHROPIC_API_KEY nor ANTHROPIC_AUTH_TOKEN is set.\n');
     process.exitCode = 1;
     return;
   }
 
-  const ui = new PiTuiUi({ model: options.model });
+  const client = new Anthropic({
+    ...(hasApiKey ? { apiKey } : {}),
+    ...(hasAuthToken ? { authToken } : {}),
+    ...(options.baseUrl !== undefined ? { baseURL: options.baseUrl } : {}),
+  });
+
+  const ui = new PiTuiUi({ model: options.model, endpoint: endpointLabel(client.baseURL) });
   const llm = new AnthropicLlm({
-    client: new Anthropic({ apiKey }),
+    client,
     model: options.model,
   });
   const repl = new NodeReplSession();
@@ -87,3 +97,12 @@ main().catch((error: unknown) => {
   process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
   process.exitCode = 1;
 });
+
+/** Short label for the endpoint the agent talks to. */
+function endpointLabel(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).host;
+  } catch {
+    return baseUrl;
+  }
+}

@@ -35,6 +35,8 @@ export interface PiTuiOptions {
   readonly model: string;
   /** Terminal to render on. Defaults to the process terminal. */
   readonly terminal?: Terminal;
+  /** Host the agent talks to, shown in the header. */
+  readonly endpoint?: string;
 }
 
 /**
@@ -62,9 +64,10 @@ export class PiTuiUi implements UiPort {
     this.#editor = new Editor(this.#tui, editorTheme);
     this.#editor.onSubmit = (text: string) => this.#submit(text);
 
-    this.#document.addChild(
-      new Text(dim(`replagent · ${options.model} · the only language here is javascript`)),
-    );
+    const header = ['replagent', options.model, options.endpoint ?? '']
+      .filter((part) => part.length > 0)
+      .join(' · ');
+    this.#document.addChild(new Text(dim(`${header} · the only language here is javascript`)));
     this.#document.addChild(new Text(''));
 
     const transcript = new ScrollView(this.#document, {

@@ -92,12 +92,38 @@ npm run dev          # or: npm run build && npm start
 
 ```
 Options:
-  --model <id>        model to use (default: claude-sonnet-4-5)
+  --model <id>        model to use (default: $ANTHROPIC_MODEL or claude-sonnet-4-5)
+  --base-url <url>    API base URL (default: $ANTHROPIC_BASE_URL or api.anthropic.com)
   --max-tokens <n>    max tokens per reply (default: 8192)
   --max-steps <n>     max REPL rounds per turn (default: 24)
 ```
 
 In the app: `/quit` leaves.
+
+### Pointing it at a gateway
+
+Precedence is always **flag > environment > default**:
+
+```bash
+# third party relay / self hosted gateway
+ANTHROPIC_BASE_URL=https://gw.example.com/v1 \
+ANTHROPIC_AUTH_TOKEN=sk-xxx \
+ANTHROPIC_MODEL=glm-4.6 \
+npm run dev
+
+# or explicitly
+replagent --base-url https://gw.example.com/v1 --model glm-4.6
+```
+
+| Variable               | Meaning                                                 |
+| ---------------------- | ------------------------------------------------------- |
+| `ANTHROPIC_API_KEY`    | sent as `x-api-key`                                     |
+| `ANTHROPIC_AUTH_TOKEN` | sent as `Authorization: Bearer` - what most relays want |
+| `ANTHROPIC_BASE_URL`   | the API root                                            |
+| `ANTHROPIC_MODEL`      | default model                                           |
+
+Either credential is enough. The resolved endpoint and model are shown in
+the header of the app, so you always know which one you are talking to.
 
 ## Notes on `node:repl`
 

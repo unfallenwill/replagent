@@ -17,14 +17,6 @@ export interface ReplObservation {
   readonly error: string | undefined;
   /** Set when the code called `finish(...)` to end the turn. */
   readonly finalAnswer: string | undefined;
-  /**
-   * Set when the result was not what the agent said it expected.
-   *
-   * The agent predicted, the REPL checked, and the prediction was wrong.
-   * That is information about the agent's model of the world, not about the
-   * code, so it travels on its own.
-   */
-  readonly mismatch: string | undefined;
   /** The step that ran, if the code was a step. */
   readonly step: ReplStep | undefined;
 }

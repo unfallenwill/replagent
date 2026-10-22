@@ -83,7 +83,6 @@ const noopObservation: ReplObservation = {
   value: undefined,
   error: undefined,
   finalAnswer: undefined,
-  mismatch: undefined,
   step: undefined,
 };
 
@@ -135,10 +134,10 @@ describe('runAgentTurn', () => {
     expect(ui.events).toContainEqual({ type: 'final', text: 'the answer' });
   });
 
-  it('shows the agent that its prediction was wrong', async () => {
+  it('shows the agent the step it ran', async () => {
     const llm = new ScriptedLlm(['const a = 1;']);
     const repl = new ScriptedRepl([
-      { ...noopObservation, value: '1', mismatch: 'MISMATCH: expected 2, got 1' },
+      { ...noopObservation, value: '1', step: { name: 'add one', description: 'count up' } },
     ]);
     const ui = new RecordingUi();
     const conversation = new Conversation();
@@ -151,10 +150,10 @@ describe('runAgentTurn', () => {
     );
 
     expect(ui.events).toContainEqual({
-      type: 'repl-mismatch',
-      text: 'MISMATCH: expected 2, got 1',
+      type: 'step',
+      name: 'add one',
+      description: 'count up',
     });
-    expect(conversation.messages[2]?.text).toContain('MISMATCH: expected 2, got 1');
   });
 
   it('gives up after the step limit', async () => {

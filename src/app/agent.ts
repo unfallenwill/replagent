@@ -75,7 +75,6 @@ export async function runAgentTurn(
           value: undefined,
           error: prepared.problem,
           finalAnswer: undefined,
-          mismatch: undefined,
           step: undefined,
         }),
       );
@@ -191,9 +190,6 @@ function emitObservation(ui: UiPort, observation: ReplObservation): void {
   }
   if (observation.value !== undefined) {
     ui.emit({ type: 'repl-value', text: observation.value });
-  }
-  if (observation.mismatch !== undefined) {
-    ui.emit({ type: 'repl-mismatch', text: observation.mismatch });
   }
   if (observation.error !== undefined) {
     ui.emit({ type: 'repl-error', text: observation.error });

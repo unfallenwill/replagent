@@ -118,55 +118,6 @@ describe('NodeReplSession', () => {
     expect(observation.finalAnswer).toBeUndefined();
   });
 
-  it('says nothing when the result is what was expected', async () => {
-    const repl = session();
-    const observation = await repl.exec('expect(2 + 2);\n2 + 2');
-
-    expect(observation.value).toBe('4');
-    expect(observation.mismatch).toBeUndefined();
-  });
-
-  it('reports a result that was not what was expected', async () => {
-    const repl = session();
-    const observation = await repl.exec('expect(3, "the answer");\n2 + 2');
-
-    expect(observation.mismatch).toBe('MISMATCH: expected 3 (the answer), got 4');
-  });
-
-  it('reports a failed run against the expectation', async () => {
-    const repl = session();
-    const observation = await repl.exec('expect(1);\nthrow new Error("boom")');
-
-    expect(observation.mismatch).toBe('MISMATCH: expected 1, the run failed');
-  });
-
-  it('checks an expectation that was made in an earlier step', async () => {
-    const repl = session();
-    await repl.exec('expect(8)');
-
-    const observation = await repl.exec('3 + 4');
-
-    expect(observation.mismatch).toBe('MISMATCH: expected 8, got 7');
-  });
-
-  it('checks a prediction against the value, not against the log', async () => {
-    const repl = session();
-    const observation = await repl.exec('expect("hello");\nconsole.log("hello");\n"goodbye"');
-
-    expect(observation.mismatch).toBe("MISMATCH: expected 'hello', got 'goodbye'");
-  });
-
-  it('keeps the prediction until a run produces a value', async () => {
-    const repl = session();
-    const first = await repl.exec('expect(7)');
-
-    expect(first.mismatch).toBeUndefined();
-
-    const second = await repl.exec('3 + 4');
-
-    expect(second.mismatch).toBeUndefined();
-  });
-
   it('keeps a model of the world', async () => {
     const repl = session();
     await repl.exec('world.observe("module count", 4, "readdir src")');
@@ -251,5 +202,41 @@ describe('NodeReplSession', () => {
     const observation = await repl.exec('scoped');
 
     expect(observation.error).toContain('scoped is not defined');
+  });
+
+  it('cuts a long line and says how much was cut', async () => {
+    const repl = session();
+    const observation = await repl.exec('console.log("x".repeat(30000))');
+
+    expect(observation.logs[0]?.length).toBeLessThan(8100);
+    expect(observation.logs[0]).toContain('more characters');
+  });
+
+  it('cuts a long value and says how much was cut', async () => {
+    const repl = session();
+    const observation = await repl.exec('"y".repeat(30000)');
+
+    expect(observation.value?.length).toBeLessThan(8100);
+    expect(observation.value).toContain('more characters');
+  });
+
+  it('leaves an ordinary exploration alone', async () => {
+    const repl = session();
+    const observation = await repl.exec(
+      'console.log(JSON.stringify({ rows: new Array(50).fill(0) }))',
+    );
+
+    expect(observation.logs[0]).not.toContain('more characters');
+  });
+
+  it('keeps an observation short when a program logs a lot', async () => {
+    const repl = session();
+    const observation = await repl.exec(
+      'for (let i = 0; i < 5000; i += 1) { console.log("line " + i); }',
+    );
+
+    const total = observation.logs.reduce((sum, line) => sum + line.length, 0);
+    expect(total).toBeLessThan(17000);
+    expect(observation.logs.at(-1)).toContain('more lines were cut');
   });
 });

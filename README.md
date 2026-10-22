@@ -62,6 +62,13 @@ If the model writes prose instead of JavaScript, the REPL returns a
 `SyntaxError` and the model sees it. The protocol punishes nothing; it just
 reports.
 
+An observation cannot run away. The REPL keeps 8,000 characters of a line
+and 16,000 of an observation, and says how much it cut, so the agent knows
+it is looking at a part of the truth. The limit is generous on purpose:
+while the agent is exploring it does not know yet what it is looking for,
+and cutting the answer to "how big is this" off is cutting off the
+exploration.
+
 ### Observations are marked
 
 Every observation comes back wrapped in `<observation>` tags, so the model can
@@ -98,26 +105,18 @@ the working directory (`--world <path>` to put it somewhere else), so the
 agent's experience survives its own restart, and the human can open the file
 and read what the agent believes.
 
-### The REPL checks the predictions
+### The world does not tell you what it means
 
-The other half of the loop is that a belief has to be able to be wrong. The
-agent states what it expects, and the REPL compares it with what the run
-actually produced:
+The world is a plain witness. It reports what happened - the lines that were
+logged, the value the step returned, the error - and it stops there. It does
+not check the agent's conclusions against reality, and it does not decide
+what the agent should have been looking for.
 
-```js
-expect(4);
-const files = await fs.promises.readdir('src');
-files.length;
-```
-
-```
-MISMATCH: expected 4, got 3
-```
-
-That line is not a failed run - it is the agent's model of the world being
-wrong, and it is the cheapest information the agent will ever get. Without
-it, an agent that guessed right looks exactly like an agent that understood
-the world, and nothing in the transcript tells them apart.
+That restraint is deliberate. While the agent is exploring it does not know
+yet what it is looking for, and a world that guesses on its behalf would
+only feed it a conclusion it had not earned. The comparison between what the
+agent concluded and what actually happened is the agent's own work, done in
+the one place it belongs: in the agent's head.
 
 ## The response hook
 
@@ -221,8 +220,7 @@ In the app: `/quit` leaves.
 The transcript is a scrollable viewport (alternate screen) with the editor
 pinned at the bottom. Everything the agent does appears there: your own
 message is echoed, what the REPL logged, the value the step returned, the
-errors, the mismatches between what the agent expected and what it got, and
-the final answer.
+errors, and the final answer.
 
 The code the agent writes is folded away by default. What the transcript
 shows is the step — its name and what it was for — because that is what the

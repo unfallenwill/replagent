@@ -4,7 +4,6 @@ import path from 'node:path';
 import process from 'node:process';
 import repl from 'node:repl';
 import { PassThrough, Writable } from 'node:stream';
-import { isDeepStrictEqual } from 'node:util';
 import type { Context } from 'node:vm';
 import type { ReplObservation, ReplPort, ReplStep } from '../../domain/ports/repl.js';
 import type { WorldPort, WorldState } from '../../domain/ports/world.js';
@@ -76,6 +75,38 @@ function uncaughtMessage(text: string): string {
   return text.replace(/^Uncaught:?\s*/, '').trim();
 }
 
+/**
+ * Cut a line down to what the agent can afford to read.
+ *
+ * The note says how much was left out, so the agent knows it is looking
+ * at a part of the truth and can go and ask for the rest.
+ */
+function cut(text: string, limit: number): string {
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, limit)}… ${text.length - limit} more characters`;
+}
+
+/**
+ * Cut a run of lines down to what one observation may say.
+ */
+function trimLogs(logs: readonly string[]): string[] {
+  let total = 0;
+  const kept: string[] = [];
+
+  for (const log of logs) {
+    if (total + log.length > MAX_OBSERVATION_CHARS) {
+      kept.push(`… ${logs.length - kept.length} more lines were cut`);
+      return kept;
+    }
+    kept.push(log);
+    total += log.length;
+  }
+
+  return kept;
+}
+
 export interface NodeReplOptions {
   /** Directory `require` resolves from. Defaults to the process cwd. */
   readonly cwd?: string;
@@ -85,14 +116,30 @@ export interface NodeReplOptions {
   readonly world: WorldPort;
 }
 
-/** What the agent said it expected a run to produce. */
-interface Expectation {
-  readonly value: unknown;
-  readonly description: string | undefined;
-}
-
 /** The body of a step: it gets its own name and description. */
 type StepBody = (name: string, description: string) => unknown;
+
+/**
+ * How much of one line the REPL keeps.
+ *
+ * An observation is the agent's only sense and also its context: a value
+ * dumped in full costs more than the whole conversation, and buries the
+ * one line in it that mattered.
+ *
+ * The limit is generous on purpose. While the agent is exploring it does
+ * not know yet what it is looking for, and cutting the answer to "how big
+ * is this" off is cutting off the exploration. The limit is there to stop
+ * a flood, not to ration the view.
+ */
+const MAX_LINE_CHARS = 8000;
+
+/**
+ * How much one observation may say in total.
+ *
+ * A program that logs a thousand lines is a program that wants to be
+ * summarised, not quoted.
+ */
+const MAX_OBSERVATION_CHARS = 16000;
 
 /**
  * A persistent Node REPL, used as the agent's world.
@@ -112,7 +159,6 @@ export class NodeReplSession implements ReplPort {
   #finalAnswer: string | undefined;
   #execToken = 0;
   #onUncaught: ((text: string) => void) | undefined;
-  #expectation: Expectation | undefined;
   #step: ReplStep | undefined;
 
   constructor(options: NodeReplOptions) {
@@ -137,7 +183,6 @@ export class NodeReplSession implements ReplPort {
     this.#installConsole();
     this.#installRequire(options.cwd ?? process.cwd());
     this.#installWorld();
-    this.#installExpect();
     this.#installStep();
     this.#tapUncaught(output);
   }
@@ -150,35 +195,17 @@ export class NodeReplSession implements ReplPort {
     this.#step = undefined;
     this.#installFinish(token);
 
-    // An expectation set by an earlier step waits for this one; an
-    // expectation set by this step is checked against this step.
-    const carried = this.#expectation;
-    this.#expectation = undefined;
-
     const outcome = await this.#evaluate(code);
-    const logs = [...this.#logs];
+    const logs = trimLogs([...this.#logs]);
     const step = this.#step;
-
-    const expectation = this.#expectation ?? carried;
-
-    let mismatch: string | undefined;
-    if (outcome.kind === 'ok' && outcome.value === undefined) {
-      // The run produced nothing to compare against, so it did not test the
-      // prediction: the expectation waits for a run that does.
-      this.#expectation = expectation;
-    } else {
-      this.#expectation = undefined;
-      mismatch = expectation === undefined ? undefined : this.#compare(expectation, outcome);
-    }
 
     if (outcome.kind !== 'ok') {
       return {
         ok: false,
         logs,
         value: undefined,
-        error: outcome.message,
+        error: cut(outcome.message, MAX_LINE_CHARS),
         finalAnswer: undefined,
-        mismatch,
         step,
       };
     }
@@ -189,29 +216,8 @@ export class NodeReplSession implements ReplPort {
       value: this.#render(outcome.value),
       error: undefined,
       finalAnswer: this.#finalAnswer,
-      mismatch,
       step,
     };
-  }
-
-  /**
-   * Check the agent's prediction against what the run produced.
-   *
-   * The check is the whole point: an agent that predicts has something to be
-   * wrong about, and the REPL is the only place that can tell it.
-   */
-  #compare(expectation: Expectation, outcome: EvalOutcome): string | undefined {
-    const wanted = this.#render(expectation.value) ?? 'undefined';
-    const described =
-      expectation.description === undefined ? wanted : `${wanted} (${expectation.description})`;
-
-    if (outcome.kind !== 'ok') {
-      return `MISMATCH: expected ${described}, the run failed`;
-    }
-    if (isDeepStrictEqual(expectation.value, outcome.value)) {
-      return undefined;
-    }
-    return `MISMATCH: expected ${described}, got ${this.#render(outcome.value) ?? 'undefined'}`;
   }
 
   /** Release the REPL's resources (readline interface, timers). */
@@ -280,7 +286,7 @@ export class NodeReplSession implements ReplPort {
     if (value === undefined) {
       return undefined;
     }
-    return this.#server.writer(value) ?? String(value);
+    return cut(this.#server.writer(value) ?? String(value), MAX_LINE_CHARS);
   }
 
   /**
@@ -309,7 +315,7 @@ export class NodeReplSession implements ReplPort {
       lines.pop();
     }
     for (const line of lines) {
-      this.#logs.push(line);
+      this.#logs.push(cut(line, MAX_LINE_CHARS));
     }
   }
 
@@ -360,18 +366,6 @@ export class NodeReplSession implements ReplPort {
       },
       state: (): WorldState => this.#worldState,
       report: (): string => formatWorld(this.#worldState),
-    };
-  }
-
-  /**
-   * The agent's prediction for the next run.
-   *
-   * The REPL checks it, so the agent neither has to remember what it
-   * expected nor has to notice the difference on its own.
-   */
-  #installExpect(): void {
-    this.#context['expect'] = (value: unknown, description?: string): void => {
-      this.#expectation = { value, description };
     };
   }
 

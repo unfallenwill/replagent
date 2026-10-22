@@ -45,9 +45,9 @@ describe('SYSTEM_PROMPT', () => {
     );
   });
 
-  it('tells the agent that the REPL checks its predictions', () => {
-    expect(SYSTEM_PROMPT).toContain('expect(value)');
-    expect(SYSTEM_PROMPT).toContain('MISMATCH: expected 4, got 3');
+  it('leaves the comparison to the agent', () => {
+    expect(SYSTEM_PROMPT).toContain('The compare step is yours');
+    expect(SYSTEM_PROMPT).toContain('it will not tell you what it means');
   });
 
   it('gives the agent a loop to work in', () => {

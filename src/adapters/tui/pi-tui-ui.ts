@@ -18,7 +18,6 @@ const dim = (text: string): string => `\u001b[2m${text}\u001b[0m`;
 const bold = (text: string): string => `\u001b[1m${text}\u001b[0m`;
 const red = (text: string): string => `\u001b[31m${text}\u001b[0m`;
 const green = (text: string): string => `\u001b[32m${text}\u001b[0m`;
-const yellow = (text: string): string => `\u001b[33m${text}\u001b[0m`;
 const cyan = (text: string): string => `\u001b[36m${text}\u001b[0m`;
 
 const selectListTheme: SelectListTheme = {
@@ -271,9 +270,6 @@ export class PiTuiUi implements UiPort {
         return;
       case 'repl-error':
         this.#document.addChild(new Text(`${red('  error')} ${event.text}`));
-        return;
-      case 'repl-mismatch':
-        this.#document.addChild(new Text(`${yellow('  ≠    ')} ${event.text}`));
         return;
       case 'final':
         this.#document.addChild(new Text(`\n${bold('answer')} ${event.text}`));

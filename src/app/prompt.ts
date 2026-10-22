@@ -67,6 +67,10 @@ The REPL is persistent. \`let\`, \`const\`, \`var\`, functions and required
 modules survive between your turns. Build up state deliberately instead of
 repeating work. A variable you defined two turns ago is still there.
 
+Because the REPL keeps its declarations, declaring the same name twice fails
+with \`Identifier 'x' has already been declared\`. Assign to the binding you
+declared earlier, or pick a new name.
+
 ## What you can reach
 
 Inside the REPL you have the whole of Node.js: \`require("node:fs")\`,

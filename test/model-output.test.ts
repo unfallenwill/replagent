@@ -57,6 +57,36 @@ describe('prepareModelOutput', () => {
     expect(prepared.code).toBe('const now = new Date();\nconsole.log(now);');
   });
 
+  it('keeps the code when a tool call envelope follows it', () => {
+    const raw = [
+      'const url = "https://example.com";',
+      'const response = await fetch(url);',
+      'console.log(response.status);',
+      '',
+      '<tool_call>{"name": "fetch", "arguments": {"url": "https://example.com"}}</tool_call>',
+    ].join('\n');
+
+    const prepared = prepareModelOutput(raw);
+
+    expect(prepared.problem).toBeUndefined();
+    expect(prepared.unwrappedToolCall).toBe(true);
+    expect(prepared.code).toBe(
+      'const url = "https://example.com";\nconst response = await fetch(url);\nconsole.log(response.status);',
+    );
+  });
+
+  it('keeps the code when an invoke envelope follows it', () => {
+    const raw = [
+      'console.log("hello");',
+      '<invoke name="fetch"><content>console.log("payload")</content></invoke>',
+    ].join('\n');
+
+    const prepared = prepareModelOutput(raw);
+
+    expect(prepared.problem).toBeUndefined();
+    expect(prepared.code).toBe('console.log("hello");');
+  });
+
   it('unwraps an openai style tool call', () => {
     const raw =
       '<tool_call>\n{"name": "repl", "arguments": {"code": "const a = 1;\\nconsole.log(a);"}}\n</tool_call>';

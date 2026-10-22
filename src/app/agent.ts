@@ -4,6 +4,7 @@ import { formatObservation } from '../domain/observation.js';
 import type { LlmPort, LlmRequest, LlmStopReason } from '../domain/ports/llm.js';
 import type { ReplObservation, ReplPort } from '../domain/ports/repl.js';
 import type { UiPort } from '../domain/ports/ui.js';
+import { explainReplError } from '../domain/repl-errors.js';
 
 export interface AgentDeps {
   readonly llm: LlmPort;
@@ -136,10 +137,17 @@ async function collectCode(
  * but does not tell the model what it did wrong. Add that.
  */
 function withTeachingNote(invalidSyntax: boolean, observation: ReplObservation): ReplObservation {
-  if (!invalidSyntax || observation.error === undefined) {
+  if (observation.error === undefined) {
     return observation;
   }
-  return { ...observation, error: `${observation.error}\n${NOT_JAVASCRIPT_ERROR}` };
+  if (invalidSyntax) {
+    return { ...observation, error: `${observation.error}\n${NOT_JAVASCRIPT_ERROR}` };
+  }
+  const note = explainReplError(observation.error);
+  if (note === undefined) {
+    return observation;
+  }
+  return { ...observation, error: `${observation.error}\n${note.note}` };
 }
 
 function emitObservation(ui: UiPort, observation: ReplObservation): void {

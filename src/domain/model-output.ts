@@ -50,6 +50,16 @@ const CODE_FENCE = /```(?:js|javascript|node|mjs|cjs|ts|typescript)?[ \t]*\r?\n(
 /** A JSON object, as used by the anthropic style tool call. */
 const JSON_OBJECT = /\{[\s\S]*\}/;
 
+/**
+ * Complete tool call blocks. A model often writes a perfectly good program
+ * and then appends a tool call it wanted to make; the code is still the code.
+ */
+const TOOL_CALL_BLOCKS = [
+  /<tool_call(?:\s[^>]*)?>[\s\S]*?<\/tool_call>/gi,
+  /<invoke(?:\s[^>]*)?>[\s\S]*?<\/invoke>/gi,
+  /<tool_use(?:\s[^>]*)?>[\s\S]*?<\/tool_use>/gi,
+];
+
 /** Keys that hold the code in a JSON tool call. */
 const CODE_KEYS = ['code', 'content', 'source', 'input', 'arguments', 'text', 'body'];
 
@@ -67,8 +77,10 @@ export interface PreparedCode {
 /** What the agent is told when it tries to call a tool that does not exist. */
 export const TOOL_CALL_ERROR: string =
   'You emitted a tool call. This world has no tools: there is no function to call, ' +
-  'no tool schema, no tool syntax. Write plain JavaScript - the REPL executes it ' +
-  'directly and the value of the last expression comes back to you as an observation.';
+  'no tool schema, no tool syntax. Everything you need is already in JavaScript - ' +
+  'to fetch a URL write `await fetch(url)`, to run a command write ' +
+  '`require("node:child_process").execFileSync(...)`, to read a file write ' +
+  '`require("node:fs").readFileSync(...)`. Reply with a program and nothing else.';
 
 /** What the agent is told when its reply is not JavaScript. */
 export const NOT_JAVASCRIPT_ERROR: string =
@@ -97,18 +109,35 @@ export function prepareModelOutput(text: string): PreparedCode {
   }
 
   const stripped = normalized.replace(ENVELOPE_PREFIX, '');
-  const payload = extractPayload(stripped);
 
-  if (payload === undefined) {
-    return {
-      code: stripped,
-      unwrappedToolCall: true,
-      invalidSyntax: false,
-      problem: TOOL_CALL_ERROR,
-    };
+  // The code may sit next to the envelope instead of inside it: a model
+  // writes a program and then appends the tool call it wanted to make. The
+  // program is still a program.
+  const withoutBlocks = stripToolCallBlocks(stripped);
+  if (withoutBlocks.length > 0 && withoutBlocks !== stripped && isValidSyntax(withoutBlocks)) {
+    return { ...plain(withoutBlocks), unwrappedToolCall: true };
   }
 
-  return { ...plain(payload), unwrappedToolCall: true };
+  // Otherwise the code is the payload of the envelope.
+  const payload = extractPayload(stripped);
+  if (payload !== undefined) {
+    return { ...plain(payload), unwrappedToolCall: true };
+  }
+
+  return {
+    code: stripped,
+    unwrappedToolCall: true,
+    invalidSyntax: false,
+    problem: TOOL_CALL_ERROR,
+  };
+}
+
+function stripToolCallBlocks(text: string): string {
+  let result = text;
+  for (const pattern of TOOL_CALL_BLOCKS) {
+    result = result.replace(pattern, '\n');
+  }
+  return result.trim();
 }
 
 function plain(code: string): PreparedCode {

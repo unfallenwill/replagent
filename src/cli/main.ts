@@ -53,6 +53,7 @@ async function main(): Promise<void> {
   const llm = new AnthropicLlm({
     client,
     model: options.model,
+    effort: options.effort,
   });
   const repl = new NodeReplSession({ world: new FileWorld(options.world) });
   const conversation = new Conversation();

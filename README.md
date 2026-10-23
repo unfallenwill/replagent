@@ -195,7 +195,7 @@ The rules are enforced in `.dependency-cruiser.cjs`:
 | Complexity   | Biome `noExcessiveCognitiveComplexity` | cognitive complexity ≤ 15                                                                                                                                                                                |
 | Architecture | `dependency-cruiser`                   | the layering above                                                                                                                                                                                       |
 | Style        | Biome                                  | formatting and correctness linting                                                                                                                                                                       |
-| Tests        | `vitest`                               | 195 tests, including real `node:repl` integration                                                                                                                                                        |
+| Tests        | `vitest`                               | 207 tests, including real `node:repl` integration                                                                                                                                                        |
 
 Each gate has been verified to actually fail on a violation, not just to
 pass on good code.
@@ -210,13 +210,17 @@ npm run dev          # or: npm run build && npm start
 
 ```
 Options:
-  --model <id>        model to use (default: $ANTHROPIC_MODEL or claude-sonnet-4-5)
-  --base-url <url>    API base URL (default: $ANTHROPIC_BASE_URL or api.anthropic.com)
-  --max-tokens <n>    max tokens per reply (default: 8192)
+  --model <id>        model to use (default: $ANTHROPIC_MODEL or MiniMax-M3.1-Flash)
+  --base-url <url>    API base URL (default: $ANTHROPIC_BASE_URL or
+                      https://api.minimax.cn/anthropic; do not add /v1)
+  --max-tokens <n>    max tokens per reply (default: 131072; thinking counts
+                      against it)
+  --effort <level>    how hard the model thinks: low|medium|high|xhigh|max
+                      (default: max, the M3.1-Flash default)
   --max-steps <n>     max REPL rounds per turn (default: 24)
   --context-window <n>
                       the model's context window in tokens, for the usage
-                      fraction in the status bar (default: known models only)
+                      fraction in the status bar (default: 1000000)
   --world <path>      where the agent keeps its model of the world
                       (default: .replagent/world.json in the working directory)
 ```
@@ -298,8 +302,19 @@ of the code, not the code. Reading the reasoning and reading the code are
 different things, so they are different keys. A reply with no reasoning
 adds no fold at all.
 
-The reasoning is not part of the conversation sent back to the model: it
-is the human's window into how the step was chosen.
+The reasoning is both a window and a memory. It is shown to the human while
+it happens, and it travels back with the assistant turn on the next request -
+text and signature, whole and in place - because interleaved thinking depends
+on the model recognising its own thoughts. A provider that exposes no
+reasoning simply sends none, and the turn stays plain text.
+
+Reasoning is asked for as well as answered. On the MiniMax models the agent
+asks for adaptive thinking - the model decides when a thought is worth
+having - and on M3.1-Flash, which always thinks, it also names the effort:
+`low`, `medium`, `high`, `xhigh`, `max`, the last being the model's own
+default. There is no `none` rung in that ladder, because the model rejects
+it outright. An endpoint that is not MiniMax is sent neither knob and is
+left exactly as it was.
 
 ### The status bar
 
@@ -307,7 +322,7 @@ The line under the editor is the one thing that never scrolls away. It is
 about the session, not the turn, so it does not move while the agent works:
 
 ```
-~/GitHub/replagent · ⎇ master · claude-sonnet-4-5          45.2k/200k · 78% cached
+~/GitHub/replagent · ⎇ master · MiniMax-M3.1-Flash         45.2k/1000k · 78% cached
 ```
 
 - On the left, where you are and who you are talking to: the working
@@ -320,9 +335,9 @@ about the session, not the turn, so it does not move while the agent works:
   window: the whole conversation, system prompt included, cache traffic
   counted too. That number is the session's real budget: every step sends
   it again, and it only ever grows. It turns yellow as the window fills.
-  When the window is not known the bar says `45.2k ctx` instead of
-  inventing a denominator; `--context-window` is there for models it does
-  not know.
+  The models this project is built for carry a million tokens, so an
+  unknown model is assumed to be in that class; a known smaller model is
+  listed, and `--context-window` overrides both.
 - `78% cached` is how much of it the API served from its prompt cache. It
   appears only when the endpoint reports cache accounting at all: an
   endpoint that never caches is not an endpoint with a zero percent hit
@@ -367,13 +382,13 @@ Precedence is always **flag > environment > default**:
 
 ```bash
 # third party relay / self hosted gateway
-ANTHROPIC_BASE_URL=https://gw.example.com/v1 \
+ANTHROPIC_BASE_URL=https://gw.example.com \
 ANTHROPIC_AUTH_TOKEN=sk-xxx \
 ANTHROPIC_MODEL=glm-4.6 \
 npm run dev
 
 # or explicitly
-replagent --base-url https://gw.example.com/v1 --model glm-4.6
+replagent --base-url https://gw.example.com --model glm-4.6
 ```
 
 | Variable               | Meaning                                                 |

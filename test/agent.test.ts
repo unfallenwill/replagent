@@ -23,7 +23,11 @@ class ScriptedLlm implements LlmPort {
       yield { type: 'thinking', text: thinking };
     }
     yield { type: 'text', text: this.#replies[index] ?? '' };
-    yield { type: 'done', stopReason: 'end_turn' };
+    yield {
+      type: 'done',
+      stopReason: 'end_turn',
+      ...(thinking.length > 0 ? { thinking: [{ text: thinking, signature: `sig-${index}` }] } : {}),
+    };
   }
 }
 
@@ -339,6 +343,25 @@ describe('runAgentTurn', () => {
     expect(ui.events).toContainEqual({ type: 'agent-thinking-delta', chars: 25 });
     expect(thinking).toBeGreaterThan(-1);
     expect(code).toBeGreaterThan(thinking);
+  });
+
+  it('keeps the reasoning with the assistant turn for the next request', async () => {
+    const llm = new ScriptedLlm(['const a = 1;'], ['one is the first number']);
+    const repl = new ScriptedRepl([{ ...noopObservation, value: 'undefined' }]);
+    const conversation = new Conversation();
+
+    await runAgentTurn(
+      deps(llm, repl, new RecordingUi(), 1),
+      conversation,
+      'what is one?',
+      new AbortController().signal,
+    );
+
+    expect(conversation.messages[1]).toEqual({
+      role: 'assistant',
+      text: 'const a = 1;',
+      thinking: [{ text: 'one is the first number', signature: 'sig-0' }],
+    });
   });
 
   it('reports the reasoning of a reply that was rejected too', async () => {

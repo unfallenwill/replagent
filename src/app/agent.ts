@@ -1,7 +1,7 @@
 import type { Conversation } from '../domain/conversation.js';
 import { NOT_JAVASCRIPT_ERROR, prepareModelOutput } from '../domain/model-output.js';
 import { formatObservation } from '../domain/observation.js';
-import type { LlmPort, LlmRequest, LlmStopReason } from '../domain/ports/llm.js';
+import type { LlmPort, LlmRequest, LlmStopReason, LlmThinkingBlock } from '../domain/ports/llm.js';
 import type { ReplObservation, ReplPort } from '../domain/ports/repl.js';
 import type { UiPort } from '../domain/ports/ui.js';
 import { explainReplError } from '../domain/repl-errors.js';
@@ -75,7 +75,7 @@ export async function runAgentTurn(
       // next step would write its code into this step's block.
       deps.ui.emit({ type: 'agent-code', text: prepared.code });
       deps.ui.emit({ type: 'repl-error', text: prepared.problem });
-      conversation.append('assistant', prepared.code);
+      conversation.append('assistant', prepared.code, reply.thinkingBlocks);
       conversation.append(
         'user',
         formatObservation({
@@ -109,7 +109,7 @@ export async function runAgentTurn(
       });
     }
 
-    conversation.append('assistant', prepared.code);
+    conversation.append('assistant', prepared.code, reply.thinkingBlocks);
     deps.ui.emit({ type: 'agent-code', text: prepared.code });
 
     // The step names itself while it runs, so the transcript can say what
@@ -137,7 +137,10 @@ export async function runAgentTurn(
 /** What one reply carried: the reasoning that led to it, and the program. */
 interface AgentReply {
   readonly code: string;
+  /** The reasoning as text, for the transcript. */
   readonly thinking: string;
+  /** The reasoning as blocks, to travel back to the model with the turn. */
+  readonly thinkingBlocks: readonly LlmThinkingBlock[];
 }
 
 /**
@@ -157,6 +160,7 @@ async function collectCode(
 
   let code = '';
   let thinking = '';
+  let thinkingBlocks: readonly LlmThinkingBlock[] = [];
   let stopReason: LlmStopReason = 'other';
 
   try {
@@ -172,6 +176,9 @@ async function collectCode(
         continue;
       }
       stopReason = event.stopReason;
+      if (event.thinking !== undefined) {
+        thinkingBlocks = event.thinking;
+      }
       if (event.usage !== undefined) {
         deps.ui.emit({ type: 'turn-usage', usage: event.usage });
       }
@@ -188,7 +195,7 @@ async function collectCode(
     deps.ui.emit({ type: 'status', text: 'The reply was cut off (max_tokens reached).' });
   }
 
-  return { code, thinking };
+  return { code, thinking, thinkingBlocks };
 }
 
 /**

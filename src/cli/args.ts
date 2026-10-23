@@ -1,8 +1,13 @@
+import { REASONING_EFFORTS, type ReasoningEffort } from '../domain/ports/llm.js';
+import { DEFAULT_CONTEXT_WINDOW } from './context-window.js';
+
 export interface CliOptions {
   readonly model: string;
-  readonly baseUrl: string | undefined;
+  readonly baseUrl: string;
   readonly maxTokens: number;
   readonly maxSteps: number;
+  /** How hard the model is asked to think, on the MiniMax ladder. */
+  readonly effort: ReasoningEffort;
   /** The model's context window, when the human knows it and we do not. */
   readonly contextWindow: number | undefined;
   /** Where the agent's model of the world is kept. */
@@ -10,9 +15,12 @@ export interface CliOptions {
   readonly help: boolean;
 }
 
-export const DEFAULT_MODEL = 'claude-sonnet-4-5';
-export const DEFAULT_MAX_TOKENS = 8192;
+export const DEFAULT_MODEL = 'MiniMax-M3.1-Flash';
+export const DEFAULT_BASE_URL = 'https://api.minimax.cn/anthropic';
+export const DEFAULT_MAX_TOKENS = 131_072;
 export const DEFAULT_MAX_STEPS = 24;
+/** M3.1-Flash's own default: the most thinking the model will do. */
+export const DEFAULT_EFFORT: ReasoningEffort = 'max';
 
 /**
  * The world model lives in the project it is a model of, and next to the
@@ -27,12 +35,16 @@ Usage:
 
 Options:
   --model <id>        model to use (default: $ANTHROPIC_MODEL or ${DEFAULT_MODEL})
-  --base-url <url>    API base URL (default: $ANTHROPIC_BASE_URL or api.anthropic.com)
-  --max-tokens <n>    max tokens per reply (default: ${DEFAULT_MAX_TOKENS})
+  --base-url <url>    API base URL (default: $ANTHROPIC_BASE_URL or
+                      ${DEFAULT_BASE_URL}; do not add /v1)
+  --max-tokens <n>    max tokens per reply (default: ${DEFAULT_MAX_TOKENS};
+                      thinking counts against it)
+  --effort <level>    how hard the model thinks: ${REASONING_EFFORTS.join('|')}
+                      (default: ${DEFAULT_EFFORT}, the M3.1-Flash default)
   --max-steps <n>     max REPL rounds per turn (default: ${DEFAULT_MAX_STEPS})
   --context-window <n>
                       the model's context window in tokens, for the usage
-                      fraction in the status bar (default: known models only)
+                      fraction in the status bar (default: ${DEFAULT_CONTEXT_WINDOW})
   --world <path>      where the agent keeps its model of the world
                       (default: ${DEFAULT_WORLD_PATH} in the working directory)
   -h, --help          show this help
@@ -61,9 +73,10 @@ export function parseArgs(
 
   return {
     model: flags.model ?? env['ANTHROPIC_MODEL'] ?? DEFAULT_MODEL,
-    baseUrl: flags.baseUrl ?? env['ANTHROPIC_BASE_URL'],
+    baseUrl: flags.baseUrl ?? env['ANTHROPIC_BASE_URL'] ?? DEFAULT_BASE_URL,
     maxTokens: flags.maxTokens ?? DEFAULT_MAX_TOKENS,
     maxSteps: flags.maxSteps ?? DEFAULT_MAX_STEPS,
+    effort: flags.effort ?? DEFAULT_EFFORT,
     contextWindow: flags.contextWindow,
     world: flags.world ?? DEFAULT_WORLD_PATH,
     help: flags.help,
@@ -75,6 +88,7 @@ interface Flags {
   baseUrl: string | undefined;
   maxTokens: number | undefined;
   maxSteps: number | undefined;
+  effort: ReasoningEffort | undefined;
   contextWindow: number | undefined;
   world: string | undefined;
   help: boolean;
@@ -93,6 +107,7 @@ function parseFlags(argv: readonly string[]): Flags {
     baseUrl: undefined,
     maxTokens: undefined,
     maxSteps: undefined,
+    effort: undefined,
     contextWindow: undefined,
     world: undefined,
     help: false,
@@ -122,6 +137,10 @@ function parseFlags(argv: readonly string[]): Flags {
         flags.baseUrl = readValue(argv, index, '--base-url');
         index += 1;
         break;
+      case '--effort':
+        flags.effort = readEffort(readValue(argv, index, '--effort'));
+        index += 1;
+        break;
       case '--world':
         flags.world = readValue(argv, index, '--world');
         index += 1;
@@ -140,6 +159,18 @@ function readValue(argv: readonly string[], index: number, flag: string): string
     throw new Error(`${flag} requires a value`);
   }
   return value;
+}
+
+/**
+ * The effort ladder the model accepts. `none` is not a cheaper rung here:
+ * M3.1-Flash rejects it, so an unknown word is an error, not a fallback.
+ */
+function readEffort(raw: string): ReasoningEffort {
+  const effort = REASONING_EFFORTS.find((candidate) => candidate === raw);
+  if (effort === undefined) {
+    throw new Error(`--effort must be one of ${REASONING_EFFORTS.join(', ')}, got "${raw}"`);
+  }
+  return effort;
 }
 
 function readNumber(argv: readonly string[], index: number, flag: string): number {

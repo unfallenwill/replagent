@@ -237,6 +237,134 @@ describe('AnthropicLlm', () => {
     expect(reasons).toEqual(['other']);
   });
 
+  it('carries the reasoning of the reply back, signature and all', async () => {
+    const { client } = fakeClient([
+      {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'thinking', thinking: '', signature: '' },
+      },
+      {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'thinking_delta', thinking: 'one is easiest' },
+      },
+      {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'signature_delta', signature: 'sig' },
+      },
+      { type: 'content_block_stop', index: 0 },
+      {
+        type: 'content_block_start',
+        index: 1,
+        content_block: { type: 'text', text: '' },
+      },
+      { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: '1;' } },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 2 } },
+    ]);
+    const llm = new AnthropicLlm({ client, model: 'test-model' });
+
+    const done = await drainDone(llm);
+
+    // The thought is not just shown: it is handed over with the turn, so the
+    // next request can send it back untouched.
+    expect(done?.thinking).toEqual([{ text: 'one is easiest', signature: 'sig' }]);
+  });
+
+  it('does not invent a thought from a lone signature', async () => {
+    const { client } = fakeClient([
+      {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'signature_delta', signature: 'sig' },
+      },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '1;' } },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+    ]);
+    const llm = new AnthropicLlm({ client, model: 'test-model' });
+
+    const done = await drainDone(llm);
+
+    expect(done?.thinking).toBeUndefined();
+  });
+
+  it('sends the reasoning back ahead of the text it produced', async () => {
+    const { client, calls } = fakeClient([]);
+    const llm = new AnthropicLlm({ client, model: 'test-model' });
+    const withThinking: LlmRequest = {
+      ...request,
+      messages: [
+        { role: 'user', text: 'hello' },
+        {
+          role: 'assistant',
+          text: 'console.log(1)',
+          thinking: [
+            { text: 'start with one', signature: 'sig-a' },
+            { text: 'then log it', signature: 'sig-b' },
+          ],
+        },
+      ],
+    };
+
+    for await (const _event of llm.stream(withThinking, new AbortController().signal)) {
+      // drain
+    }
+
+    expect(calls[0]?.body).toMatchObject({
+      messages: [
+        { role: 'user', content: 'hello' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'start with one', signature: 'sig-a' },
+            { type: 'thinking', thinking: 'then log it', signature: 'sig-b' },
+            { type: 'text', text: 'console.log(1)' },
+          ],
+        },
+      ],
+    });
+  });
+
+  it('asks M3.1-Flash to think adaptively, at the chosen effort', async () => {
+    const { client, calls } = fakeClient([]);
+    const llm = new AnthropicLlm({ client, model: 'MiniMax-M3.1-Flash', effort: 'high' });
+
+    for await (const _event of llm.stream(request, new AbortController().signal)) {
+      // drain
+    }
+
+    expect(calls[0]?.body).toMatchObject({
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'high' },
+    });
+  });
+
+  it('leaves the effort off a model that has no ladder for it', async () => {
+    const { client, calls } = fakeClient([]);
+    const llm = new AnthropicLlm({ client, model: 'MiniMax-M3', effort: 'high' });
+
+    for await (const _event of llm.stream(request, new AbortController().signal)) {
+      // drain
+    }
+
+    // M3 thinks when told to, but does not grade how hard.
+    expect(calls[0]?.body).toMatchObject({ thinking: { type: 'adaptive' } });
+    expect(calls[0]?.body).not.toHaveProperty('output_config');
+  });
+
+  it('sends no thinking knobs to an endpoint that is not MiniMax', async () => {
+    const { client, calls } = fakeClient([]);
+    const llm = new AnthropicLlm({ client, model: 'claude-sonnet-4-5' });
+
+    for await (const _event of llm.stream(request, new AbortController().signal)) {
+      // drain
+    }
+
+    expect(calls[0]?.body).not.toHaveProperty('thinking');
+    expect(calls[0]?.body).not.toHaveProperty('output_config');
+  });
+
   it('sends the conversation and the system prompt, and no tools', async () => {
     const { client, calls } = fakeClient([]);
     const llm = new AnthropicLlm({ client, model: 'test-model' });

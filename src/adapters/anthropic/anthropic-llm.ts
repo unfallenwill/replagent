@@ -1,15 +1,22 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type {
+  LlmMessage,
   LlmPort,
   LlmRequest,
   LlmStopReason,
   LlmStreamEvent,
+  LlmThinkingBlock,
   LlmUsage,
+  ReasoningEffort,
 } from '../../domain/ports/llm.js';
+
+type DoneEvent = Extract<LlmStreamEvent, { type: 'done' }>;
 
 export interface AnthropicLlmOptions {
   readonly client: Anthropic;
   readonly model: string;
+  /** How hard the model is asked to think; M3.1-Flash's ladder. */
+  readonly effort?: ReasoningEffort;
 }
 
 /**
@@ -18,14 +25,21 @@ export interface AnthropicLlmOptions {
  * Note what is *not* here: no tool definitions. The agent has no tools, so
  * the request carries nothing but a system prompt and a conversation, and the
  * reply is JavaScript.
+ *
+ * Reasoning is different: it is not a tool, it is part of the reply. When the
+ * model thought before it spoke, that block is carried back on the assistant
+ * turn exactly as it arrived - text and signature - because interleaved
+ * thinking is built on the model recognising its own thoughts.
  */
 export class AnthropicLlm implements LlmPort {
   readonly #client: Anthropic;
   readonly #model: string;
+  readonly #effort: ReasoningEffort;
 
   constructor(options: AnthropicLlmOptions) {
     this.#client = options.client;
     this.#model = options.model;
+    this.#effort = options.effort ?? 'max';
   }
 
   async *stream(request: LlmRequest, signal: AbortSignal): AsyncIterable<LlmStreamEvent> {
@@ -34,16 +48,19 @@ export class AnthropicLlm implements LlmPort {
         model: this.#model,
         max_tokens: request.maxTokens,
         system: request.system,
+        ...reasoningParams(this.#model, this.#effort),
         messages: request.messages.map((message) => ({
           role: message.role,
-          content: message.text,
+          content: toContent(message),
         })),
       },
       { signal },
     );
 
     const tracker = new UsageTracker();
+    const content = new ContentTracker();
     for await (const event of stream) {
+      content.read(event);
       if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
         yield { type: 'text', text: event.delta.text };
         continue;
@@ -54,16 +71,158 @@ export class AnthropicLlm implements LlmPort {
       }
       const done = tracker.read(event);
       if (done !== undefined) {
-        yield done;
+        yield withThinking(done, content.thinking());
       }
     }
 
     // A stream that ends without ever saying why still gets its `done`.
     const done = tracker.flush();
     if (done !== undefined) {
-      yield done;
+      yield withThinking(done, content.thinking());
     }
   }
+}
+
+/**
+ * The thinking knobs MiniMax understands, for the models that take them.
+ *
+ * M3.1-Flash thinks always and is asked how hard; M3 thinks only when told
+ * to, so it gets the switch without the ladder. Other endpoints - Claude, a
+ * gateway - are left exactly as they were.
+ */
+function reasoningParams(model: string, effort: ReasoningEffort): ReasoningParams {
+  if (!model.startsWith('MiniMax-M3')) {
+    return {};
+  }
+  return {
+    thinking: { type: 'adaptive' },
+    ...(model.startsWith('MiniMax-M3.1') ? { output_config: { effort } } : {}),
+  };
+}
+
+interface ReasoningParams {
+  readonly thinking?: { readonly type: 'adaptive' };
+  readonly output_config?: { readonly effort: ReasoningEffort };
+}
+
+/**
+ * The message as the API wants it: plain text unless there was reasoning, in
+ * which case the turn is the thinking blocks followed by the text they led
+ * to. The signature goes back untouched. A provider that signed nothing gets
+ * an empty signature, which is the only value the typed API will accept for
+ * a field it never filled.
+ */
+function toContent(message: LlmMessage): Anthropic.Messages.MessageParam['content'] {
+  if (
+    message.role !== 'assistant' ||
+    message.thinking === undefined ||
+    message.thinking.length === 0
+  ) {
+    return message.text;
+  }
+  const blocks: Anthropic.Messages.ContentBlockParam[] = message.thinking.map((block) => ({
+    type: 'thinking',
+    thinking: block.text,
+    signature: block.signature ?? '',
+  }));
+  if (message.text.length > 0) {
+    blocks.push({ type: 'text', text: message.text });
+  }
+  return blocks;
+}
+
+function withThinking(done: DoneEvent, thinking: readonly LlmThinkingBlock[]): DoneEvent {
+  return thinking.length > 0 ? { ...done, thinking } : done;
+}
+
+/**
+ * The content blocks of one stream, folded back into their order.
+ *
+ * A reply is more than its text. The reasoning arrives as its own block, and
+ * the API expects that block back on the next request - whole, in place, with
+ * the signature it was issued. Deltas are keyed by block index; a signature
+ * delta replaces the block's signature, because the API sends it complete.
+ */
+class ContentTracker {
+  readonly #blocks = new Map<number, TrackedBlock>();
+
+  /** Fold one upstream event. Text and thinking deltas both land in a block. */
+  read(event: Anthropic.Messages.RawMessageStreamEvent): void {
+    if (event.type === 'content_block_start') {
+      this.#start(event);
+      return;
+    }
+    if (event.type === 'content_block_delta') {
+      this.#delta(event);
+    }
+  }
+
+  #start(event: Anthropic.Messages.RawContentBlockStartEvent): void {
+    const block = event.content_block;
+    if (block.type === 'thinking') {
+      this.#blocks.set(event.index, {
+        kind: 'thinking',
+        text: block.thinking,
+        ...(block.signature.length > 0 ? { signature: block.signature } : {}),
+      });
+      return;
+    }
+    if (block.type === 'text') {
+      this.#blocks.set(event.index, { kind: 'text', text: block.text });
+    }
+  }
+
+  #delta(event: Anthropic.Messages.RawContentBlockDeltaEvent): void {
+    const delta = event.delta;
+    if (delta.type === 'text_delta') {
+      this.#block(event.index, 'text').text += delta.text;
+      return;
+    }
+    if (delta.type === 'thinking_delta') {
+      this.#block(event.index, 'thinking').text += delta.thinking;
+      return;
+    }
+    if (delta.type === 'signature_delta') {
+      // A signature belongs to a block that already exists; a lone one is not
+      // a thought and must not invent one.
+      const block = this.#blocks.get(event.index);
+      if (block !== undefined && block.kind === 'thinking') {
+        block.signature = delta.signature;
+      }
+    }
+  }
+
+  /** The reasoning blocks, in the order the model produced them. */
+  thinking(): readonly LlmThinkingBlock[] {
+    return [...this.#blocks.entries()]
+      .sort(([left], [right]) => left - right)
+      .flatMap(([, block]) =>
+        block.kind === 'thinking' && block.text.length > 0
+          ? [
+              {
+                text: block.text,
+                ...(block.signature !== undefined ? { signature: block.signature } : {}),
+              },
+            ]
+          : [],
+      );
+  }
+
+  #block(index: number, kind: TrackedBlock['kind']): TrackedBlock {
+    const existing = this.#blocks.get(index);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const created: TrackedBlock = { kind, text: '' };
+    this.#blocks.set(index, created);
+    return created;
+  }
+}
+
+interface TrackedBlock {
+  readonly kind: 'thinking' | 'text';
+  text: string;
+  signature?: string;
 }
 
 /**
@@ -83,7 +242,7 @@ class UsageTracker {
   #reported = false;
 
   /** Fold one upstream event. A `done` comes back once the stream says why it stopped. */
-  read(event: Anthropic.Messages.RawMessageStreamEvent): LlmStreamEvent | undefined {
+  read(event: Anthropic.Messages.RawMessageStreamEvent): DoneEvent | undefined {
     if (event.type === 'message_start') {
       this.#fold(event.message.usage);
       return undefined;
@@ -105,7 +264,7 @@ class UsageTracker {
   }
 
   /** The `done` for a stream that never gave a reason, with what was known by then. */
-  flush(): LlmStreamEvent | undefined {
+  flush(): DoneEvent | undefined {
     if (this.#reported) {
       return undefined;
     }

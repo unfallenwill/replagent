@@ -23,6 +23,37 @@ describe('Conversation', () => {
     expect(conversation.messages).toEqual([{ role: 'user', text: 'first\n\nsecond' }]);
   });
 
+  it('keeps the reasoning with the assistant turn it produced', () => {
+    const conversation = new Conversation();
+    conversation.append('user', 'hello');
+    conversation.append('assistant', 'const a = 1;', [
+      { text: 'one is the easiest', signature: 'sig-1' },
+    ]);
+
+    expect(conversation.messages).toEqual([
+      { role: 'user', text: 'hello' },
+      {
+        role: 'assistant',
+        text: 'const a = 1;',
+        thinking: [{ text: 'one is the easiest', signature: 'sig-1' }],
+      },
+    ]);
+  });
+
+  it('merges the reasoning of two turns that become one', () => {
+    const conversation = new Conversation();
+    conversation.append('assistant', 'first', [{ text: 'thinking first' }]);
+    conversation.append('assistant', 'second', [{ text: 'thinking second', signature: 'sig-2' }]);
+
+    expect(conversation.messages).toEqual([
+      {
+        role: 'assistant',
+        text: 'first\n\nsecond',
+        thinking: [{ text: 'thinking first' }, { text: 'thinking second', signature: 'sig-2' }],
+      },
+    ]);
+  });
+
   it('ignores empty text', () => {
     const conversation = new Conversation();
     conversation.append('user', '');

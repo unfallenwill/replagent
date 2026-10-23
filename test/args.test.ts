@@ -1,15 +1,34 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_MODEL, DEFAULT_WORLD_PATH, parseArgs } from '../src/cli/args.js';
+import {
+  DEFAULT_BASE_URL,
+  DEFAULT_EFFORT,
+  DEFAULT_MODEL,
+  DEFAULT_WORLD_PATH,
+  parseArgs,
+} from '../src/cli/args.js';
 
 describe('parseArgs', () => {
   it('uses the defaults', () => {
     const options = parseArgs([], {});
     expect(options.model).toBe(DEFAULT_MODEL);
-    expect(options.baseUrl).toBeUndefined();
-    expect(options.maxTokens).toBe(8192);
+    expect(options.baseUrl).toBe(DEFAULT_BASE_URL);
+    expect(options.maxTokens).toBe(131_072);
     expect(options.maxSteps).toBe(24);
+    expect(options.effort).toBe(DEFAULT_EFFORT);
     expect(options.contextWindow).toBeUndefined();
     expect(options.world).toBe(DEFAULT_WORLD_PATH);
+  });
+
+  it('reads the thinking effort', () => {
+    expect(parseArgs(['--effort', 'low'], {}).effort).toBe('low');
+    expect(parseArgs(['--effort', 'xhigh'], {}).effort).toBe('xhigh');
+  });
+
+  it('rejects an effort the model does not have', () => {
+    // M3.1-Flash has no `none` rung: it rejects the word outright.
+    expect(() => parseArgs(['--effort', 'none'], {})).toThrow(
+      '--effort must be one of low, medium, high, xhigh, max',
+    );
   });
 
   it('reads the context window', () => {

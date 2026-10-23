@@ -272,6 +272,55 @@ describe('AnthropicLlm', () => {
     expect(done?.thinking).toEqual([{ text: 'one is easiest', signature: 'sig' }]);
   });
 
+  it('opens a block a gateway sent without its fields', async () => {
+    // The protocol says a thinking block opens with `thinking` and
+    // `signature`, and a text block with `text`. Gateways omit them; an
+    // omitted field is empty, not a crash before the deltas arrive.
+    const { client } = fakeClient([
+      { type: 'content_block_start', index: 0, content_block: { type: 'thinking' } },
+      {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'thinking_delta', thinking: 'one is easiest' },
+      },
+      { type: 'content_block_start', index: 1, content_block: { type: 'text' } },
+      { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: '1;' } },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+    ]);
+    const llm = new AnthropicLlm({ client, model: 'test-model' });
+
+    const kinds: string[] = [];
+    let done: DoneEvent | undefined;
+    for await (const event of llm.stream(request, new AbortController().signal)) {
+      kinds.push(event.type);
+      if (event.type === 'done') {
+        done = event;
+      }
+    }
+
+    expect(kinds).toEqual(['thinking', 'text', 'done']);
+    expect(done?.thinking).toEqual([{ text: 'one is easiest' }]);
+  });
+
+  it('ignores a delta that carries no text', async () => {
+    const { client } = fakeClient([
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '1;' } },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+    ]);
+    const llm = new AnthropicLlm({ client, model: 'test-model' });
+
+    const texts: string[] = [];
+    for await (const event of llm.stream(request, new AbortController().signal)) {
+      if (event.type !== 'done') {
+        texts.push(`${event.type}:${event.text}`);
+      }
+    }
+
+    expect(texts).toEqual(['text:1;']);
+  });
+
   it('does not invent a thought from a lone signature', async () => {
     const { client } = fakeClient([
       {

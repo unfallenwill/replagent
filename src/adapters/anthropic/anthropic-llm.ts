@@ -61,12 +61,9 @@ export class AnthropicLlm implements LlmPort {
     const content = new ContentTracker();
     for await (const event of stream) {
       content.read(event);
-      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-        yield { type: 'text', text: event.delta.text };
-        continue;
-      }
-      if (event.type === 'content_block_delta' && event.delta.type === 'thinking_delta') {
-        yield { type: 'thinking', text: event.delta.thinking };
+      const delta = deltaOf(event);
+      if (delta !== undefined) {
+        yield delta;
         continue;
       }
       const done = tracker.read(event);
@@ -136,6 +133,35 @@ function withThinking(done: DoneEvent, thinking: readonly LlmThinkingBlock[]): D
 }
 
 /**
+ * What a delta adds, when it adds anything. Empty deltas - and the deltas
+ * that carry no text at all, which some gateways send - are not events: the
+ * tracker has already folded them, and the UI has nothing to draw.
+ */
+function deltaOf(event: Anthropic.Messages.RawMessageStreamEvent): LlmStreamEvent | undefined {
+  if (event.type !== 'content_block_delta') {
+    return undefined;
+  }
+  const delta = event.delta;
+  if (delta.type === 'text_delta') {
+    const text = textOf(delta.text);
+    return text.length > 0 ? { type: 'text', text } : undefined;
+  }
+  if (delta.type === 'thinking_delta') {
+    const thinking = textOf(delta.thinking);
+    return thinking.length > 0 ? { type: 'thinking', text: thinking } : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * A string field as the wire sent it. The protocol says these are strings;
+ * gateways omit them, and an omitted field must read as empty, not throw.
+ */
+function textOf(raw: unknown): string {
+  return typeof raw === 'string' ? raw : '';
+}
+
+/**
  * The content blocks of one stream, folded back into their order.
  *
  * A reply is more than its text. The reasoning arrives as its own block, and
@@ -159,35 +185,41 @@ class ContentTracker {
 
   #start(event: Anthropic.Messages.RawContentBlockStartEvent): void {
     const block = event.content_block;
+    // A gateway is free to open a block with the fields the protocol
+    // describes left out. Opening happens before anything is known about the
+    // block, so an absent field is an empty one here, not a reason to lose
+    // the session: the deltas that follow carry the content.
     if (block.type === 'thinking') {
+      const signature = textOf(block.signature);
       this.#blocks.set(event.index, {
         kind: 'thinking',
-        text: block.thinking,
-        ...(block.signature.length > 0 ? { signature: block.signature } : {}),
+        text: textOf(block.thinking),
+        ...(signature.length > 0 ? { signature } : {}),
       });
       return;
     }
     if (block.type === 'text') {
-      this.#blocks.set(event.index, { kind: 'text', text: block.text });
+      this.#blocks.set(event.index, { kind: 'text', text: textOf(block.text) });
     }
   }
 
   #delta(event: Anthropic.Messages.RawContentBlockDeltaEvent): void {
     const delta = event.delta;
     if (delta.type === 'text_delta') {
-      this.#block(event.index, 'text').text += delta.text;
+      this.#block(event.index, 'text').text += textOf(delta.text);
       return;
     }
     if (delta.type === 'thinking_delta') {
-      this.#block(event.index, 'thinking').text += delta.thinking;
+      this.#block(event.index, 'thinking').text += textOf(delta.thinking);
       return;
     }
     if (delta.type === 'signature_delta') {
       // A signature belongs to a block that already exists; a lone one is not
       // a thought and must not invent one.
+      const signature = textOf(delta.signature);
       const block = this.#blocks.get(event.index);
-      if (block !== undefined && block.kind === 'thinking') {
-        block.signature = delta.signature;
+      if (signature.length > 0 && block !== undefined && block.kind === 'thinking') {
+        block.signature = signature;
       }
     }
   }

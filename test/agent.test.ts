@@ -3,6 +3,7 @@ import { type AgentDeps, runAgentTurn } from '../src/app/agent.js';
 import { Conversation } from '../src/domain/conversation.js';
 import type { LlmPort, LlmRequest, LlmStreamEvent } from '../src/domain/ports/llm.js';
 import type { ReplObservation, ReplPort, ReplStep } from '../src/domain/ports/repl.js';
+import type { SessionEventInput, SessionWriter } from '../src/domain/ports/session.js';
 import type { UiEvent, UiPort } from '../src/domain/ports/ui.js';
 
 class ScriptedLlm implements LlmPort {
@@ -66,6 +67,23 @@ class ScriptedRepl implements ReplPort {
       onStep?.(next.step);
     }
     return next;
+  }
+}
+
+class RecordingSession implements SessionWriter {
+  readonly id = 'test-session';
+  readonly events: SessionEventInput[] = [];
+
+  append(event: SessionEventInput): void {
+    this.events.push(event);
+  }
+
+  checkpoint(): void {
+    // not used in these tests
+  }
+
+  close(): void {
+    // not used in these tests
   }
 }
 
@@ -417,6 +435,79 @@ describe('runAgentTurn', () => {
     expect(ui.events.filter((event) => event.type === 'exec-done')).toHaveLength(1);
   });
 
+  it('records the turn in the session, in the order it happened', async () => {
+    const llm = new ScriptedLlm(['const a = 1;']);
+    const repl = new ScriptedRepl([{ ...noopObservation, value: '1' }]);
+    const session = new RecordingSession();
+
+    await runAgentTurn(
+      { ...deps(llm, repl, new RecordingUi(), 1), session },
+      new Conversation(),
+      'what is one?',
+      new AbortController().signal,
+    );
+
+    expect(session.events.map((event) => event.type)).toEqual([
+      'turn.start',
+      'message',
+      'message',
+      'observation',
+      'message',
+      'note',
+      'turn.end',
+    ]);
+    expect(session.events[1]).toMatchObject({
+      type: 'message',
+      origin: 'human',
+      message: { role: 'user', text: 'what is one?' },
+    });
+    expect(session.events[2]).toMatchObject({
+      type: 'message',
+      origin: 'assistant',
+      message: { role: 'assistant', text: 'const a = 1;' },
+    });
+    // The observation is what the terminal saw, in structure; the message
+    // beside it is what the model reads.
+    expect(session.events[3]).toMatchObject({ type: 'observation' });
+    expect(session.events[4]).toMatchObject({
+      type: 'message',
+      origin: 'observation',
+      message: { role: 'user' },
+    });
+    // A note is part of the transcript and part of the record.
+    expect(session.events[5]).toMatchObject({ type: 'note' });
+    expect(session.events[6]).toMatchObject({ type: 'turn.end', status: 'limit' });
+  });
+
+  it('marks a finished turn as finished, and a cancelled one as cancelled', async () => {
+    const finished = new RecordingSession();
+    await runAgentTurn(
+      {
+        ...deps(
+          new ScriptedLlm(['finish("done")']),
+          new ScriptedRepl([{ ...noopObservation, finalAnswer: 'done' }]),
+          new RecordingUi(),
+        ),
+        session: finished,
+      },
+      new Conversation(),
+      'do it',
+      new AbortController().signal,
+    );
+    expect(finished.events.at(-1)).toEqual({ type: 'turn.end', status: 'finished' });
+
+    const cancelled = new RecordingSession();
+    const controller = new AbortController();
+    controller.abort();
+    await runAgentTurn(
+      { ...deps(new FailingLlm(), new ScriptedRepl([]), new RecordingUi()), session: cancelled },
+      new Conversation(),
+      'do it',
+      controller.signal,
+    );
+    expect(cancelled.events.at(-1)).toEqual({ type: 'turn.end', status: 'cancelled' });
+  });
+
   it('stops when the turn is cancelled', async () => {
     const llm = new FailingLlm();
     const repl = new ScriptedRepl([]);
@@ -433,6 +524,24 @@ describe('runAgentTurn', () => {
 
     expect(result.finished).toBe(false);
     expect(ui.events).toContainEqual({ type: 'status', text: 'Cancelled.' });
+    expect(ui.events).toContainEqual({ type: 'busy', busy: false });
+  });
+
+  it('settles the work when the turn throws', async () => {
+    const ui = new RecordingUi();
+
+    await expect(
+      runAgentTurn(
+        deps(new FailingLlm(), new ScriptedRepl([]), ui),
+        new Conversation(),
+        'do it',
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow();
+
+    // The error is reported by whoever catches it; the spinner is this
+    // function's to stop, and a spinner that never settles says work is
+    // still running when nothing is.
     expect(ui.events).toContainEqual({ type: 'busy', busy: false });
   });
 });

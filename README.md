@@ -195,7 +195,7 @@ The rules are enforced in `.dependency-cruiser.cjs`:
 | Complexity   | Biome `noExcessiveCognitiveComplexity` | cognitive complexity ≤ 15                                                                                                                                                                                |
 | Architecture | `dependency-cruiser`                   | the layering above                                                                                                                                                                                       |
 | Style        | Biome                                  | formatting and correctness linting                                                                                                                                                                       |
-| Tests        | `vitest`                               | 207 tests, including real `node:repl` integration                                                                                                                                                        |
+| Tests        | `vitest`                               | 242 tests, including real `node:repl` integration                                                                                                                                                        |
 
 Each gate has been verified to actually fail on a violation, not just to
 pass on good code.
@@ -223,9 +223,46 @@ Options:
                       fraction in the status bar (default: 1000000)
   --world <path>      where the agent keeps its model of the world
                       (default: .replagent/world.json in the working directory)
+  --resume <id>       continue a recorded session (id prefix is enough)
+  --continue          continue the most recent session for this directory
+  --list-sessions     list this directory's sessions and exit
+  --no-session        do not record this session
 ```
 
 In the app: `/quit` leaves.
+
+### Sessions
+
+Every run is recorded, and a run can pick up where an earlier one stopped:
+
+```bash
+replagent --list-sessions                 # what this directory has
+replagent --continue                      # the newest one
+replagent --resume 20261023T191005Z       # a prefix of an id is enough
+replagent --no-session                    # record nothing
+```
+
+Sessions live outside the repository, under `~/.replagent/projects/<cwd>`
+(override the root with `REPLAGENT_HOME`), one append-only JSONL file per
+session. A line is written when something happens, and the file is fsynced
+at the end of a turn, so a crash costs at most the turn that was running.
+The header pins the model, the effort and a hash of the system prompt; the
+events that follow are the conversation itself - what the human said, what
+the model wrote and thought, what the REPL observed, and the notes about
+limits and failures. Streaming deltas are never written: a log of deltas is
+a log nobody can resume from.
+
+The full design - the file format, the locking, the rules for replaying
+reasoning to a different model, and what a resume does to MiniMax's prompt
+cache - is in [docs/session-storage.md](docs/session-storage.md).
+
+Two things worth knowing before you rely on it:
+- **A session records what the agent read and printed.** Source files, logs,
+  whatever a step happened to dump. That is the point, and also the reason
+  it does not live in the project. On a shared or CI machine, use
+  `--no-session`.
+- **Credentials are never written.** The API key and auth token stay in the
+  environment; the system prompt is kept only as a hash.
 
 ### Feedback
 
@@ -322,16 +359,20 @@ The line under the editor is the one thing that never scrolls away. It is
 about the session, not the turn, so it does not move while the agent works:
 
 ```
-~/GitHub/replagent · ⎇ master · MiniMax-M3.1-Flash         45.2k/1000k · 78% cached
+~/GitHub/replagent · ⎇ master · MiniMax-M3.1-Flash · 844430e2   45.2k/1000k · 78% cached
 ```
 
 - On the left, where you are and who you are talking to: the working
   directory (read again as you go, so a `process.chdir` in a step shows
   up), the git branch when the directory is in a repository - `⎇` a branch
   name, or the short commit when HEAD is detached, read from `.git`
-  without spawning git - and the model. A gateway's host appears too; the
-  default endpoint does not, because you already know what it is.
-- `45.2k/200k` is what the last request carried against the model's context
+  without spawning git - the model, and the tail of the session id. A
+  gateway's host appears too; the default endpoint does not, because you
+  already know what it is.
+- `844430e2` is the session being written. It is there on a new session as
+  well as a resumed one, so two terminals on the same project can be told
+  apart; `--no-session` removes it, because there is no file to name.
+- `45.2k/1000k` is what the last request carried against the model's context
   window: the whole conversation, system prompt included, cache traffic
   counted too. That number is the session's real budget: every step sends
   it again, and it only ever grows. It turns yellow as the window fills.

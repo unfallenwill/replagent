@@ -12,6 +12,14 @@ export interface CliOptions {
   readonly contextWindow: number | undefined;
   /** Where the agent's model of the world is kept. */
   readonly world: string;
+  /** The session to continue, by id or id prefix. */
+  readonly resume: string | undefined;
+  /** Continue the most recently used session for this directory. */
+  readonly continueLatest: boolean;
+  /** Print the session list and exit. */
+  readonly listSessions: boolean;
+  /** Run without recording the conversation. */
+  readonly noSession: boolean;
   readonly help: boolean;
 }
 
@@ -47,7 +55,12 @@ Options:
                       fraction in the status bar (default: ${DEFAULT_CONTEXT_WINDOW})
   --world <path>      where the agent keeps its model of the world
                       (default: ${DEFAULT_WORLD_PATH} in the working directory)
-  -h, --help          show this help
+  --resume <id>       continue a recorded session (id prefix is enough)
+  --continue          continue the most recent session for this directory
+  --list-sessions     list this directory's sessions and exit
+  --no-session        do not record this session
+
+Sessions are kept in ${'$'}REPLAGENT_HOME/projects/<cwd> (default: ~/.replagent).
 
 Environment:
   ANTHROPIC_API_KEY     api key (x-api-key)
@@ -79,6 +92,10 @@ export function parseArgs(
     effort: flags.effort ?? DEFAULT_EFFORT,
     contextWindow: flags.contextWindow,
     world: flags.world ?? DEFAULT_WORLD_PATH,
+    resume: flags.resume,
+    continueLatest: flags.continueLatest,
+    listSessions: flags.listSessions,
+    noSession: flags.noSession,
     help: flags.help,
   };
 }
@@ -91,6 +108,10 @@ interface Flags {
   effort: ReasoningEffort | undefined;
   contextWindow: number | undefined;
   world: string | undefined;
+  resume: string | undefined;
+  continueLatest: boolean;
+  listSessions: boolean;
+  noSession: boolean;
   help: boolean;
 }
 
@@ -101,8 +122,29 @@ const NUMBER_FLAGS: Readonly<Record<string, 'maxTokens' | 'maxSteps' | 'contextW
   '--context-window': 'contextWindow',
 };
 
-function parseFlags(argv: readonly string[]): Flags {
-  const flags: Flags = {
+type BooleanFlag = 'help' | 'continueLatest' | 'listSessions' | 'noSession';
+
+/** The flags that are a switch, and the option each one turns on. */
+const BOOLEAN_FLAGS: Readonly<Record<string, BooleanFlag>> = {
+  '-h': 'help',
+  '--help': 'help',
+  '--continue': 'continueLatest',
+  '--list-sessions': 'listSessions',
+  '--no-session': 'noSession',
+};
+
+type ValueFlag = 'model' | 'baseUrl' | 'world' | 'resume';
+
+/** The flags that carry a string, and the option each one fills in. */
+const VALUE_FLAGS: Readonly<Record<string, ValueFlag>> = {
+  '--model': 'model',
+  '--base-url': 'baseUrl',
+  '--world': 'world',
+  '--resume': 'resume',
+};
+
+function emptyFlags(): Flags {
+  return {
     model: undefined,
     baseUrl: undefined,
     maxTokens: undefined,
@@ -110,47 +152,57 @@ function parseFlags(argv: readonly string[]): Flags {
     effort: undefined,
     contextWindow: undefined,
     world: undefined,
+    resume: undefined,
+    continueLatest: false,
+    listSessions: false,
+    noSession: false,
     help: false,
   };
+}
 
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === undefined) {
-      continue;
-    }
-    const numberFlag = NUMBER_FLAGS[arg];
-    if (numberFlag !== undefined) {
-      flags[numberFlag] = readNumber(argv, index, arg);
-      index += 1;
-      continue;
-    }
-    switch (arg) {
-      case '-h':
-      case '--help':
-        flags.help = true;
-        break;
-      case '--model':
-        flags.model = readValue(argv, index, '--model');
-        index += 1;
-        break;
-      case '--base-url':
-        flags.baseUrl = readValue(argv, index, '--base-url');
-        index += 1;
-        break;
-      case '--effort':
-        flags.effort = readEffort(readValue(argv, index, '--effort'));
-        index += 1;
-        break;
-      case '--world':
-        flags.world = readValue(argv, index, '--world');
-        index += 1;
-        break;
-      default:
-        throw new Error(`Unknown argument: ${arg}`);
-    }
+function parseFlags(argv: readonly string[]): Flags {
+  const flags = emptyFlags();
+  let index = 0;
+  while (index < argv.length) {
+    index += parseFlag(argv, index, flags);
+  }
+  if (flags.resume !== undefined && flags.continueLatest) {
+    throw new Error('--resume and --continue cannot be combined');
+  }
+  return flags;
+}
+
+/** Read the flag at `index`, and answer how many arguments it took. */
+function parseFlag(argv: readonly string[], index: number, flags: Flags): number {
+  const arg = argv[index];
+  if (arg === undefined) {
+    return 1;
   }
 
-  return flags;
+  const numberFlag = NUMBER_FLAGS[arg];
+  if (numberFlag !== undefined) {
+    flags[numberFlag] = readNumber(argv, index, arg);
+    return 2;
+  }
+
+  const booleanFlag = BOOLEAN_FLAGS[arg];
+  if (booleanFlag !== undefined) {
+    flags[booleanFlag] = true;
+    return 1;
+  }
+
+  const valueFlag = VALUE_FLAGS[arg];
+  if (valueFlag !== undefined) {
+    flags[valueFlag] = readValue(argv, index, arg);
+    return 2;
+  }
+
+  if (arg === '--effort') {
+    flags.effort = readEffort(readValue(argv, index, arg));
+    return 2;
+  }
+
+  throw new Error(`Unknown argument: ${arg}`);
 }
 
 function readValue(argv: readonly string[], index: number, flag: string): string {

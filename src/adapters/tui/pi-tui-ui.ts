@@ -127,6 +127,8 @@ export interface PiTuiOptions {
   readonly endpoint?: string;
   /** The model's context window in tokens, for the context fraction. */
   readonly contextWindow?: number;
+  /** The recorded session's id. Shown shortened, so two terminals differ. */
+  readonly sessionId?: string;
   /** Where the agent is standing. Read afresh as the bar updates. */
   readonly location?: () => Location;
   /** Capture mouse events so the wheel scrolls the transcript. Default: true. */
@@ -1019,6 +1021,7 @@ export class PiTuiUi implements UiPort {
     const location = this.#location();
     const branch = location.branch === undefined ? undefined : `⎇ ${location.branch}`;
     const model = this.#options.model;
+    const session = this.#options.sessionId?.slice(-8);
     const endpoint = this.#endpointSegment();
     const variant = (
       where: string,
@@ -1030,6 +1033,7 @@ export class PiTuiUi implements UiPort {
         where,
         keepBranch ? branch : undefined,
         keepModel ? model : undefined,
+        keepModel ? session : undefined,
         keepEndpoint ? endpoint : undefined,
       ]
         .filter((part): part is string => part !== undefined && part.length > 0)

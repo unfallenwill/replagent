@@ -31,6 +31,25 @@ describe('parseArgs', () => {
     );
   });
 
+  it('records sessions unless told not to', () => {
+    const options = parseArgs([], {});
+    expect(options.resume).toBeUndefined();
+    expect(options.continueLatest).toBe(false);
+    expect(options.listSessions).toBe(false);
+    expect(options.noSession).toBe(false);
+  });
+
+  it('reads the session flags', () => {
+    expect(parseArgs(['--resume', '20261023'], {}).resume).toBe('20261023');
+    expect(parseArgs(['--continue'], {}).continueLatest).toBe(true);
+    expect(parseArgs(['--list-sessions'], {}).listSessions).toBe(true);
+    expect(parseArgs(['--no-session'], {}).noSession).toBe(true);
+  });
+
+  it('refuses to resume and continue at once', () => {
+    expect(() => parseArgs(['--resume', 'x', '--continue'], {})).toThrow('cannot be combined');
+  });
+
   it('reads the context window', () => {
     const options = parseArgs(['--context-window', '1000000'], {});
 

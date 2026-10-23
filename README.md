@@ -195,7 +195,7 @@ The rules are enforced in `.dependency-cruiser.cjs`:
 | Complexity   | Biome `noExcessiveCognitiveComplexity` | cognitive complexity ≤ 15                                                                                                                                                                                |
 | Architecture | `dependency-cruiser`                   | the layering above                                                                                                                                                                                       |
 | Style        | Biome                                  | formatting and correctness linting                                                                                                                                                                       |
-| Tests        | `vitest`                               | 193 tests, including real `node:repl` integration                                                                                                                                                        |
+| Tests        | `vitest`                               | 195 tests, including real `node:repl` integration                                                                                                                                                        |
 
 Each gate has been verified to actually fail on a violation, not just to
 pass on good code.

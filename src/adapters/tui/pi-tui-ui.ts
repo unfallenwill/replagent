@@ -4,6 +4,8 @@ import {
   Container,
   Editor,
   type EditorTheme,
+  isKeyRelease,
+  type KeyId,
   matchesKey,
   ProcessTerminal,
   ScrollView,
@@ -277,31 +279,38 @@ export class PiTuiUi implements UiPort {
 
     // ctrl+c never reaches the editor: the first press interrupts the turn,
     // the second one leaves.
-    this.#tui.addInputListener((data) => {
-      if (!matchesKey(data, 'ctrl+c')) {
-        return undefined;
-      }
+    this.#onKey('ctrl+c', () => {
       this.#handleInterrupt();
-      return { consume: true };
     });
 
     // ctrl+e folds the code of the last step open and shut again.
-    this.#tui.addInputListener((data) => {
-      if (!matchesKey(data, 'ctrl+e')) {
-        return undefined;
-      }
+    this.#onKey('ctrl+e', () => {
       this.#toggleLatestStep();
-      return { consume: true };
     });
 
     // ctrl+o does the same for the reasoning that came before it. Reading
     // the thinking and reading the code are different things, so they are
     // different keys.
+    this.#onKey('ctrl+o', () => {
+      this.#toggleLatestThought();
+    });
+  }
+
+  /**
+   * A key our own listeners act on, as a press.
+   *
+   * A terminal with the Kitty keyboard protocol reports the release of a
+   * key as well as its press, and both parse as the same key. A toggle that
+   * acted on both would undo itself before the screen caught up - ctrl+e
+   * would open the fold and close it again - and a second ctrl+c release
+   * would leave the session the user only meant to interrupt.
+   */
+  #onKey(key: KeyId, onPress: () => void): void {
     this.#tui.addInputListener((data) => {
-      if (!matchesKey(data, 'ctrl+o')) {
+      if (isKeyRelease(data) || !matchesKey(data, key)) {
         return undefined;
       }
-      this.#toggleLatestThought();
+      onPress();
       return { consume: true };
     });
   }

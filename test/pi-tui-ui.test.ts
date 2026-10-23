@@ -392,6 +392,29 @@ describe('PiTuiUi', () => {
     ui.stop();
   });
 
+  it('opens the fold once per press, even when the release is reported too', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
+
+    void ui.run();
+    await tick();
+
+    ui.emit({ type: 'agent-code', text: 'const secret = "hidden";' });
+    ui.emit({ type: 'step', name: 'look around', description: 'see what is here' });
+    ui.emit({ type: 'exec-done' });
+    await tick();
+
+    // The Kitty keyboard protocol reports both edges of the key: ctrl+e
+    // down, then ctrl+e up. Only the press is a keystroke.
+    terminal.onInput?.('\u001b[101;5u');
+    terminal.onInput?.('\u001b[101;5:3u');
+    await tick(120);
+
+    expect(plain(terminal.output)).toContain('hidden');
+
+    ui.stop();
+  });
+
   it('colours the code when the step is asked for', async () => {
     const terminal = new FakeTerminal();
     const ui = new PiTuiUi({
@@ -890,6 +913,39 @@ describe('PiTuiUi', () => {
 
     terminal.onInput?.('\x03');
     await expect(running).resolves.toBeUndefined();
+  });
+
+  it('does not count the release of ctrl+c as a second press', async () => {
+    const terminal = new FakeTerminal();
+    let interrupts = 0;
+    const ui = new PiTuiUi({
+      model: 'test-model',
+      terminal,
+      location: atRepository,
+      onInterrupt: () => {
+        interrupts += 1;
+      },
+    });
+
+    let finished = false;
+    const running = ui.run().then(() => {
+      finished = true;
+    });
+    await tick();
+
+    terminal.onInput?.('\u001b[99;5u');
+    await tick();
+    terminal.onInput?.('\u001b[99;5:3u');
+    await tick();
+
+    // The key went down and came back up: that is one press, and the
+    // session stays open waiting for the second one.
+    expect(interrupts).toBe(1);
+    expect(finished).toBe(false);
+    expect(plain(ui.statusBarText)).toContain('press ctrl+c again to quit');
+
+    ui.stop();
+    await running;
   });
 
   it('scrolls the transcript with the mouse wheel', async () => {

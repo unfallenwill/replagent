@@ -48,7 +48,7 @@ async function main(): Promise<void> {
   const promptHash = hashPrompt(SYSTEM_PROMPT);
   const session = startSession(store, options, promptHash);
   const contextWindow = contextWindowFor(options.model, options.contextWindow);
-  const ui = createUi(options, client, contextWindow, session.writer, () => {
+  const ui = createUi(options, contextWindow, session.writer, () => {
     currentController?.abort();
   });
 
@@ -218,14 +218,12 @@ function applyResume(ui: UiPort, session: StartedSession, model: string, promptH
 
 function createUi(
   options: CliOptions,
-  client: Anthropic,
   contextWindow: number,
   writer: SessionWriter | undefined,
   onInterrupt: () => void,
 ): PiTuiUi {
   return new PiTuiUi({
     model: options.model,
-    endpoint: endpointLabel(client.baseURL),
     contextWindow,
     ...(writer !== undefined ? { sessionId: writer.id } : {}),
     formatter: new JsBeautifyFormatter(),
@@ -264,12 +262,3 @@ main().catch((error: unknown) => {
   process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
   process.exitCode = 1;
 });
-
-/** Short label for the endpoint the agent talks to. */
-function endpointLabel(baseUrl: string): string {
-  try {
-    return new URL(baseUrl).host;
-  } catch {
-    return baseUrl;
-  }
-}

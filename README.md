@@ -366,9 +366,9 @@ about the session, not the turn, so it does not move while the agent works:
   directory (read again as you go, so a `process.chdir` in a step shows
   up), the git branch when the directory is in a repository - `⎇` a branch
   name, or the short commit when HEAD is detached, read from `.git`
-  without spawning git - the model, and the tail of the session id. A
-  gateway's host appears too; the default endpoint does not, because you
-  already know what it is.
+  without spawning git - the model, and the tail of the session id. The
+  endpoint is not one of them: the bar says where you are and what you are
+  working on, not where the bytes come from.
 - `844430e2` is the session being written. It is there on a new session as
   well as a resumed one, so two terminals on the same project can be told
   apart; `--no-session` removes it, because there is no file to name.
@@ -439,8 +439,8 @@ replagent --base-url https://gw.example.com --model glm-4.6
 | `ANTHROPIC_BASE_URL`   | the API root                                            |
 | `ANTHROPIC_MODEL`      | default model                                           |
 
-Either credential is enough. The resolved endpoint and model are shown in
-the status bar of the app, so you always know which one you are talking to.
+Either credential is enough. The model you are talking to is shown in the
+status bar of the app, so you always know which one it is.
 
 ## Notes on `node:repl`
 

@@ -525,29 +525,6 @@ describe('PiTuiUi', () => {
     ui.stop();
   });
 
-  it('shows the endpoint only when it is not the default one', async () => {
-    const terminal = new FakeTerminal();
-    const gateway = new PiTuiUi({
-      model: 'test-model',
-      endpoint: 'gw.example.com',
-      terminal,
-      location: atRepository,
-    });
-
-    expect(plain(gateway.statusBarText)).toContain('test-model · gw.example.com');
-    gateway.stop();
-
-    const direct = new PiTuiUi({
-      model: 'test-model',
-      endpoint: 'api.anthropic.com',
-      terminal,
-      location: atRepository,
-    });
-
-    expect(plain(direct.statusBarText)).not.toContain('api.anthropic.com');
-    direct.stop();
-  });
-
   it('shows what the conversation weighs, against the window it fits in', async () => {
     const terminal = new FakeTerminal();
     const ui = new PiTuiUi({

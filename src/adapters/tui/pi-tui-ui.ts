@@ -41,12 +41,6 @@ const SPINNER_INTERVAL_MS = 80;
 const QUIT_CONFIRM_MS = 2000;
 
 /**
- * The endpoint you get by saying nothing. Only an endpoint that is not this
- * one is worth a place in the bar.
- */
-const DEFAULT_ENDPOINT = 'api.anthropic.com';
-
-/**
  * How much of the step budget may be spent before the transcript says so.
  * The note is a receipt, not a countdown: it appears once.
  */
@@ -123,8 +117,6 @@ export interface PiTuiOptions {
   readonly model: string;
   /** Terminal to render on. Defaults to the process terminal. */
   readonly terminal?: Terminal;
-  /** Host the agent talks to, shown in the bar when it is not the default. */
-  readonly endpoint?: string;
   /** The model's context window in tokens, for the context fraction. */
   readonly contextWindow?: number;
   /** The recorded session's id. Shown shortened, so two terminals differ. */
@@ -1014,47 +1006,31 @@ export class PiTuiUi implements UiPort {
 
   /**
    * The left half, longest first. The path gives up its leading segments,
-   * then the endpoint and the model leave - the directory and the branch
-   * are where you are, and that is the last thing to go.
+   * then the model leaves - the directory and the branch are where you are,
+   * and that is the last thing to go.
    */
   #barIdentityVariants(): string[] {
     const location = this.#location();
     const branch = location.branch === undefined ? undefined : `⎇ ${location.branch}`;
     const model = this.#options.model;
     const session = this.#options.sessionId?.slice(-8);
-    const endpoint = this.#endpointSegment();
-    const variant = (
-      where: string,
-      keepBranch: boolean,
-      keepModel: boolean,
-      keepEndpoint: boolean,
-    ): string =>
+    const variant = (where: string, keepBranch: boolean, keepModel: boolean): string =>
       [
         where,
         keepBranch ? branch : undefined,
         keepModel ? model : undefined,
         keepModel ? session : undefined,
-        keepEndpoint ? endpoint : undefined,
       ]
         .filter((part): part is string => part !== undefined && part.length > 0)
         .join(' · ');
 
     return [
-      variant(location.path, true, true, true),
-      variant(elidePath(location.path, 2), true, true, true),
-      variant(elidePath(location.path, 1), true, true, true),
-      variant(elidePath(location.path, 1), true, true, false),
-      variant(elidePath(location.path, 1), true, false, false),
-      variant(elidePath(location.path, 1), false, false, false),
+      variant(location.path, true, true),
+      variant(elidePath(location.path, 2), true, true),
+      variant(elidePath(location.path, 1), true, true),
+      variant(elidePath(location.path, 1), true, false),
+      variant(elidePath(location.path, 1), false, false),
     ];
-  }
-
-  #endpointSegment(): string | undefined {
-    const endpoint = this.#options.endpoint;
-    if (endpoint === undefined || endpoint.length === 0 || endpoint === DEFAULT_ENDPOINT) {
-      return undefined;
-    }
-    return endpoint;
   }
 
   /**

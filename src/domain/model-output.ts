@@ -19,6 +19,7 @@
  */
 
 import repl from 'node:repl';
+import { scanUnit, type UnitScan } from './unit.js';
 
 const ZERO_WIDTH = /[\u200B-\u200D\uFEFF]/g;
 
@@ -87,6 +88,8 @@ export interface PreparedCode {
   readonly invalidSyntax: boolean;
   /** Set when the output could not be turned into code at all. */
   readonly problem: string | undefined;
+  /** Whether the code is one well-formed unit. */
+  readonly unit: UnitScan;
 }
 
 /** What the agent is told when it tries to call a tool that does not exist. */
@@ -116,6 +119,7 @@ export function prepareModelOutput(text: string): PreparedCode {
       unwrappedToolCall: false,
       invalidSyntax: false,
       problem: EMPTY_REPLY_ERROR,
+      unit: scanUnit(''),
     };
   }
 
@@ -153,6 +157,7 @@ export function prepareModelOutput(text: string): PreparedCode {
       unwrappedToolCall: true,
       invalidSyntax: false,
       problem: TOOL_CALL_ERROR,
+      unit: scanUnit(stripped),
     };
   }
 
@@ -208,6 +213,7 @@ function plain(code: string): PreparedCode {
     unwrappedToolCall: false,
     invalidSyntax: code.length > 0 && !isValidSyntax(code),
     problem: undefined,
+    unit: scanUnit(code),
   };
 }
 

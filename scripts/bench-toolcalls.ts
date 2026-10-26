@@ -18,6 +18,7 @@ import { runAgentTurn } from '../src/app/agent.js';
 import { SYSTEM_PROMPT } from '../src/app/prompt.js';
 import { Conversation } from '../src/domain/conversation.js';
 import type { UiEvent, UiPort } from '../src/domain/ports/ui.js';
+import { MessageQueue } from '../src/domain/queue.js';
 
 const TASKS = [
   '查一下 https://registry.npmjs.org/@anthropic-ai%2fclaude-code 这个包的最新版本号',
@@ -46,17 +47,20 @@ async function runOnce(llm: AnthropicLlm, task: string): Promise<RunResult> {
     stop: () => {},
   };
 
+  const queue = new MessageQueue();
+  queue.push('human', task);
+
   const result = await runAgentTurn(
     {
       llm,
-      repl: new NodeReplSession(),
+      repl: new NodeReplSession({ cwd: process.cwd() }),
       ui,
+      queue,
       systemPrompt: SYSTEM_PROMPT,
       maxTokens: 4096,
       maxSteps: 12,
     },
     new Conversation(),
-    task,
     new AbortController().signal,
   );
 

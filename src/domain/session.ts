@@ -1,5 +1,6 @@
 import { Conversation } from './conversation.js';
 import type { SessionEvent, SessionHeader, SessionSummary } from './ports/session.js';
+import { formatQueue } from './queue.js';
 
 /** How much of the first thing the human said fits in a listing. */
 const SUMMARY_CHARS = 80;
@@ -10,9 +11,18 @@ const SUMMARY_CHARS = 80;
  * It is appended as a user message because that is what it is - something
  * the model has to know before it acts again. Pretending the turn never
  * happened would invite it to repeat side effects that may already exist.
+ *
+ * It wears the queue's clothes, because the model reads it as it reads
+ * everything else: as the runtime talking, labelled, and never as the human.
  */
-export const INTERRUPTED_NOTE: string =
-  '<observation>\nThe previous session ended while this turn was running. Its effects are unknown; check the world model before repeating it.\n</observation>';
+export const INTERRUPTED_NOTE: string = formatQueue([
+  {
+    origin: 'error',
+    text:
+      'The previous session ended while this turn was running. Its effects are unknown; ' +
+      'check before repeating it.',
+  },
+]);
 
 /**
  * Rebuild the conversation the way it was.
@@ -22,6 +32,10 @@ export const INTERRUPTED_NOTE: string =
  * what the model actually saw. Thinking blocks are replayed only when the
  * session was recorded against the same model: a signature is the issuing
  * provider's proof, not a portable credential.
+ *
+ * A v2 file keeps what went into the request in its queue events, and the
+ * model's own replies in message events. A v1 file keeps both as messages.
+ * Reading the two kinds of event side by side rebuilds either file.
  */
 export function restoreConversation(
   events: readonly SessionEvent[],
@@ -29,11 +43,14 @@ export function restoreConversation(
 ): Conversation {
   const conversation = new Conversation();
   for (const event of events) {
-    if (event.type !== 'message') {
+    if (event.type === 'message') {
+      const thinking = replayThinking ? event.message.thinking : undefined;
+      conversation.append(event.message.role, event.message.text, thinking);
       continue;
     }
-    const thinking = replayThinking ? event.message.thinking : undefined;
-    conversation.append(event.message.role, event.message.text, thinking);
+    if (event.type === 'queue') {
+      conversation.append('user', formatQueue(event.entries));
+    }
   }
   return conversation;
 }
@@ -70,13 +87,7 @@ export function summarise(
   events: readonly SessionEvent[],
   updatedAt: string,
 ): SessionSummary {
-  const firstUserText = events
-    .filter(
-      (event): event is Extract<SessionEvent, { type: 'message' }> =>
-        event.type === 'message' && event.message.role === 'user' && event.origin === 'human',
-    )
-    .map((event) => event.message.text)
-    .at(0);
+  const firstUserText = findFirstUserText(events);
 
   const title = events
     .filter((event): event is Extract<SessionEvent, { type: 'title' }> => event.type === 'title')
@@ -91,6 +102,29 @@ export function summarise(
     ...(firstUserText !== undefined ? { firstUserText: shorten(firstUserText) } : {}),
     ...(title !== undefined ? { title } : {}),
   };
+}
+
+/**
+ * The first thing the human said.
+ *
+ * In a v2 file the human's words live in the queue, among the model's own
+ * deposits; in a v1 file they were a message of their own. Both are read,
+ * because both kinds of file can still be opened.
+ */
+function findFirstUserText(events: readonly SessionEvent[]): string | undefined {
+  for (const event of events) {
+    if (event.type === 'queue') {
+      const human = event.entries.find((entry) => entry.origin === 'human');
+      if (human !== undefined) {
+        return human.text;
+      }
+      continue;
+    }
+    if (event.type === 'message' && event.message.role === 'user' && event.origin === 'human') {
+      return event.message.text;
+    }
+  }
+  return undefined;
 }
 
 /** One line, short enough for a list. */

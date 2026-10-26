@@ -98,9 +98,9 @@ describe('PiTuiUi', () => {
     await tick();
 
     ui.emit({ type: 'user-message', text: 'hello agent' });
-    ui.emit({ type: 'agent-code', text: 'finish("hi")' });
-    ui.emit({ type: 'step', name: 'say hi', description: 'finish the turn' });
-    ui.emit({ type: 'final', text: 'hi there' });
+    ui.emit({ type: 'agent-code', text: 'say("hi")' });
+    ui.emit({ type: 'step', name: 'say hi', description: 'say what is to be said' });
+    ui.emit({ type: 'say', text: 'hi there' });
     await tick();
 
     const screen = plain(terminal.output);
@@ -449,7 +449,7 @@ describe('PiTuiUi', () => {
     ui.emit({ type: 'agent-code', text: 'const secret = "hidden";' });
     ui.emit({ type: 'step', name: 'look around', description: 'see what is here' });
     ui.emit({ type: 'exec-done' });
-    ui.emit({ type: 'final', text: 'the answer' });
+    ui.emit({ type: 'say', text: 'the answer' });
     await tick();
 
     terminal.onInput?.('\x05');
@@ -480,7 +480,7 @@ describe('PiTuiUi', () => {
     ui.emit({ type: 'agent-code', text: 'const a = 1;' });
     ui.emit({ type: 'step', name: '打个招呼', description: '向用户问好' });
     ui.emit({ type: 'exec-done' });
-    ui.emit({ type: 'final', text: '你好！' });
+    ui.emit({ type: 'say', text: '你好！' });
     await tick();
 
     ui.stop();
@@ -756,7 +756,7 @@ describe('PiTuiUi', () => {
     ui.stop();
   });
 
-  it('folds the logs and the value into the step', async () => {
+  it('folds the tools it used into the step', async () => {
     const terminal = new FakeTerminal();
     const ui = new PiTuiUi({ model: 'test-model', terminal, location: atRepository });
 
@@ -765,22 +765,21 @@ describe('PiTuiUi', () => {
 
     ui.emit({ type: 'agent-code', text: 'const a = 1;' });
     ui.emit({ type: 'step', name: 'a step', description: 'do the thing' });
-    ui.emit({ type: 'repl-log', text: 'a log line' });
-    ui.emit({ type: 'repl-value', text: '42' });
+    ui.emit({ type: 'tool', tool: 'read', intent: 'see what is in it', detail: 'a.txt' });
     ui.emit({ type: 'exec-done' });
     await tick();
 
     const collapsed = plain(terminal.output);
     expect(collapsed).toContain('a step');
-    expect(collapsed).not.toContain('a log line');
-    expect(collapsed).not.toContain('42');
+    expect(collapsed).not.toContain('see what is in it');
+    expect(collapsed).not.toContain('a.txt');
 
     terminal.onInput?.('\x05');
     await tick(120);
 
     const opened = plain(terminal.output);
-    expect(opened).toContain('a log line');
-    expect(opened).toContain('42');
+    expect(opened).toContain('see what is in it');
+    expect(opened).toContain('a.txt');
 
     ui.stop();
   });
@@ -933,7 +932,7 @@ describe('PiTuiUi', () => {
     await tick();
 
     for (let index = 0; index < 60; index += 1) {
-      ui.emit({ type: 'repl-log', text: `line ${index}` });
+      ui.emit({ type: 'say', text: `line ${index}` });
     }
     await tick(120);
 

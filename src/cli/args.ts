@@ -10,8 +10,6 @@ export interface CliOptions {
   readonly effort: ReasoningEffort;
   /** The model's context window, when the human knows it and we do not. */
   readonly contextWindow: number | undefined;
-  /** Where the agent's model of the world is kept. */
-  readonly world: string;
   /** The session to continue, by id or id prefix. */
   readonly resume: string | undefined;
   /** Continue the most recently used session for this directory. */
@@ -30,12 +28,6 @@ export const DEFAULT_MAX_STEPS = 24;
 /** M3.1-Flash's own default: the most thinking the model will do. */
 export const DEFAULT_EFFORT: ReasoningEffort = 'max';
 
-/**
- * The world model lives in the project it is a model of, and next to the
- * work rather than in a hidden place somewhere else.
- */
-export const DEFAULT_WORLD_PATH = '.replagent/world.json';
-
 export const HELP: string = `replagent - an agent whose only language is javascript
 
 Usage:
@@ -53,8 +45,6 @@ Options:
   --context-window <n>
                       the model's context window in tokens, for the usage
                       fraction in the status bar (default: ${DEFAULT_CONTEXT_WINDOW})
-  --world <path>      where the agent keeps its model of the world
-                      (default: ${DEFAULT_WORLD_PATH} in the working directory)
   --resume <id>       continue a recorded session (id prefix is enough)
   --continue          continue the most recent session for this directory
   --list-sessions     list this directory's sessions and exit
@@ -91,7 +81,6 @@ export function parseArgs(
     maxSteps: flags.maxSteps ?? DEFAULT_MAX_STEPS,
     effort: flags.effort ?? DEFAULT_EFFORT,
     contextWindow: flags.contextWindow,
-    world: flags.world ?? DEFAULT_WORLD_PATH,
     resume: flags.resume,
     continueLatest: flags.continueLatest,
     listSessions: flags.listSessions,
@@ -107,7 +96,6 @@ interface Flags {
   maxSteps: number | undefined;
   effort: ReasoningEffort | undefined;
   contextWindow: number | undefined;
-  world: string | undefined;
   resume: string | undefined;
   continueLatest: boolean;
   listSessions: boolean;
@@ -133,13 +121,12 @@ const BOOLEAN_FLAGS: Readonly<Record<string, BooleanFlag>> = {
   '--no-session': 'noSession',
 };
 
-type ValueFlag = 'model' | 'baseUrl' | 'world' | 'resume';
+type ValueFlag = 'model' | 'baseUrl' | 'resume';
 
 /** The flags that carry a string, and the option each one fills in. */
 const VALUE_FLAGS: Readonly<Record<string, ValueFlag>> = {
   '--model': 'model',
   '--base-url': 'baseUrl',
-  '--world': 'world',
   '--resume': 'resume',
 };
 
@@ -151,7 +138,6 @@ function emptyFlags(): Flags {
     maxSteps: undefined,
     effort: undefined,
     contextWindow: undefined,
-    world: undefined,
     resume: undefined,
     continueLatest: false,
     listSessions: false,

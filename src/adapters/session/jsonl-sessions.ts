@@ -20,8 +20,8 @@ import {
   type LlmMessage,
   type LlmThinkingBlock,
   REASONING_EFFORTS,
+  type ReasoningEffort,
 } from '../../domain/ports/llm.js';
-import type { ReplObservation } from '../../domain/ports/repl.js';
 import type {
   LoadedSession,
   SessionEvent,
@@ -34,6 +34,7 @@ import type {
   SessionTurnStatus,
   SessionWriter,
 } from '../../domain/ports/session.js';
+import type { QueueEntry } from '../../domain/queue.js';
 import { summarise } from '../../domain/session.js';
 
 /** How much of a file a listing reads: the header and the first few events. */
@@ -46,8 +47,18 @@ const TURN_STATUSES: readonly SessionTurnStatus[] = [
   'limit',
   'rejected',
   'error',
+  'idle',
 ];
 const ORIGINS: readonly SessionMessageOrigin[] = ['human', 'assistant', 'observation', 'resume'];
+const QUEUE_ORIGINS = ['human', 'model', 'error'] as const;
+
+/**
+ * Event types an older file had and this one does not write.
+ *
+ * A v1 file's observation is read and dropped: the transcript it belonged to
+ * is gone, but the line is not damage.
+ */
+const LEGACY_EVENT_TYPES: ReadonlySet<string> = new Set(['observation']);
 
 export interface JsonlSessionStoreOptions {
   /** The replagent home, `~/.replagent` by default. */
@@ -88,7 +99,7 @@ export class JsonlSessionStore implements SessionStore {
     try {
       const header: SessionHeader = {
         ...start,
-        v: 1,
+        v: 2,
         type: 'session',
         id,
         at: now.toISOString(),
@@ -366,7 +377,9 @@ function parseSession(text: string): ParsedSession {
     }
     const event = asEvent(raw);
     if (event === undefined) {
-      ignored += 1;
+      if (!isLegacyEvent(raw)) {
+        ignored += 1;
+      }
       continue;
     }
     events.push(event);
@@ -383,31 +396,63 @@ function tryParse(line: string): unknown {
   }
 }
 
-function asHeader(raw: unknown): SessionHeader | undefined {
-  if (!isRecord(raw) || raw['v'] !== 1 || raw['type'] !== 'session') {
+/** The header fields that are plain strings. */
+const HEADER_STRINGS = ['id', 'at', 'cwd', 'model', 'systemPromptHash', 'agent'] as const;
+
+/** The numbers a header carries. */
+interface HeaderFields {
+  readonly effort: ReasoningEffort;
+  readonly maxTokens: number;
+  readonly maxSteps: number;
+}
+
+/** Whether the header has every field it needs, and what they are. */
+function headerFields(raw: Record<string, unknown>): HeaderFields | undefined {
+  const effort = asOneOf(raw['effort'], REASONING_EFFORTS);
+  const maxTokens = raw['maxTokens'];
+  const maxSteps = raw['maxSteps'];
+  if (effort === undefined || typeof maxTokens !== 'number' || typeof maxSteps !== 'number') {
     return undefined;
   }
-  const effort = asOneOf(raw['effort'], REASONING_EFFORTS);
-  const strings = ['id', 'at', 'cwd', 'model', 'world', 'systemPromptHash', 'agent'] as const;
-  if (
-    effort === undefined ||
-    typeof raw['maxTokens'] !== 'number' ||
-    typeof raw['maxSteps'] !== 'number' ||
-    !strings.every((key) => typeof raw[key] === 'string')
-  ) {
+  if (!HEADER_STRINGS.every((key) => typeof raw[key] === 'string')) {
+    return undefined;
+  }
+  return { effort, maxTokens, maxSteps };
+}
+
+/** The schema version a file was written with. */
+function asVersion(raw: unknown): 1 | 2 | undefined {
+  return raw === 1 || raw === 2 ? raw : undefined;
+}
+
+function asHeader(raw: unknown): SessionHeader | undefined {
+  if (!isRecord(raw)) {
+    return undefined;
+  }
+  const version = asVersion(raw['v']);
+  if (version === undefined || raw['type'] !== 'session') {
+    return undefined;
+  }
+  const fields = headerFields(raw);
+  if (fields === undefined) {
+    return undefined;
+  }
+  // A v1 file always named a world. A v2 file has none to name.
+  const world = raw['world'];
+  if (version === 1 && typeof world !== 'string') {
     return undefined;
   }
   return {
-    v: 1,
+    v: version,
     type: 'session',
     id: raw['id'] as string,
     at: raw['at'] as string,
     cwd: raw['cwd'] as string,
     model: raw['model'] as string,
-    effort,
-    maxTokens: raw['maxTokens'],
-    maxSteps: raw['maxSteps'],
-    world: raw['world'] as string,
+    effort: fields.effort,
+    maxTokens: fields.maxTokens,
+    maxSteps: fields.maxSteps,
+    ...(typeof world === 'string' ? { world } : {}),
     systemPromptHash: raw['systemPromptHash'] as string,
     agent: raw['agent'] as string,
   };
@@ -432,8 +477,10 @@ const EVENT_BODIES: Readonly<Record<string, EventBodyParser>> = {
   'turn.start': () => ({ type: 'turn.start' }),
   'turn.end': turnEndBody,
   message: asMessageEvent,
+  queue: queueBody,
   step: stepBody,
-  observation: observationBody,
+  tool: toolBody,
+  say: textBody('say'),
   note: textBody('note'),
   title: textBody('title'),
 };
@@ -456,12 +503,40 @@ function stepBody(raw: Record<string, unknown>): SessionEventInput | undefined {
     : undefined;
 }
 
-function observationBody(raw: Record<string, unknown>): SessionEventInput | undefined {
-  const observation = asObservation(raw['observation']);
-  return observation === undefined ? undefined : { type: 'observation', observation };
+function toolBody(raw: Record<string, unknown>): SessionEventInput | undefined {
+  const tool = raw['tool'];
+  const intent = raw['intent'];
+  const detail = raw['detail'];
+  return typeof tool === 'string' && typeof intent === 'string' && typeof detail === 'string'
+    ? { type: 'tool', tool, intent, detail }
+    : undefined;
 }
 
-function textBody(type: 'note' | 'title'): EventBodyParser {
+function queueBody(raw: Record<string, unknown>): SessionEventInput | undefined {
+  const entries = asQueueEntries(raw['entries']);
+  return entries === undefined ? undefined : { type: 'queue', entries };
+}
+
+function asQueueEntries(raw: unknown): QueueEntry[] | undefined {
+  if (!Array.isArray(raw)) {
+    return undefined;
+  }
+  const entries: QueueEntry[] = [];
+  for (const entry of raw) {
+    if (!isRecord(entry)) {
+      return undefined;
+    }
+    const origin = asOneOf(entry['origin'], QUEUE_ORIGINS);
+    const text = entry['text'];
+    if (origin === undefined || typeof text !== 'string') {
+      return undefined;
+    }
+    entries.push({ origin, text });
+  }
+  return entries;
+}
+
+function textBody(type: 'say' | 'note' | 'title'): EventBodyParser {
   return (raw) => {
     const text = raw['text'];
     return typeof text === 'string' ? { type, text } : undefined;
@@ -523,15 +598,6 @@ function asThinking(raw: unknown): LlmThinkingBlock[] | undefined {
   return blocks;
 }
 
-function asObservation(raw: unknown): ReplObservation | undefined {
-  if (!isRecord(raw) || typeof raw['ok'] !== 'boolean') {
-    return undefined;
-  }
-  // The rest is display material; a missing list is read as empty by the
-  // replay rather than treated as a damaged line.
-  return raw as unknown as ReplObservation;
-}
-
 function asUsage(raw: unknown): { input: number; output: number; cached?: number } | undefined {
   if (!isRecord(raw) || typeof raw['input'] !== 'number' || typeof raw['output'] !== 'number') {
     return undefined;
@@ -550,4 +616,9 @@ function asOneOf<T extends string>(raw: unknown, values: readonly T[]): T | unde
 
 function isRecord(raw: unknown): raw is Record<string, unknown> {
   return typeof raw === 'object' && raw !== null;
+}
+
+/** Whether the line was an event type this version no longer writes. */
+function isLegacyEvent(raw: unknown): boolean {
+  return isRecord(raw) && typeof raw['type'] === 'string' && LEGACY_EVENT_TYPES.has(raw['type']);
 }

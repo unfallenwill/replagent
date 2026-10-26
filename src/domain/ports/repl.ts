@@ -1,29 +1,21 @@
 /**
  * The only sensory organ of the agent.
  *
- * Every turn the agent writes JavaScript; the REPL runs it and reports back
- * what happened: what was logged, what the last expression evaluated to, and
- * whether it blew up. Nothing else reaches the agent.
+ * Every turn the agent writes one unit of JavaScript; the REPL runs it and
+ * reports back what happened. There are four things that can happen inside a
+ * unit, and each of them is an event:
+ *
+ *   - the unit names itself, before its body runs;
+ *   - a tool runs, with the reason it was called;
+ *   - the agent says something to the human;
+ *   - the agent deposits something for the model to read next.
+ *
+ * There is nothing else. A unit has no return value to read, no console to
+ * print to and no way to end the turn on its own: `say` is the only way out,
+ * and `deposit` is the only way to talk back to the model.
  */
 
-export interface ReplObservation {
-  /** True when the code ran to completion without throwing. */
-  readonly ok: boolean;
-  /** Everything the code wrote through `console`. */
-  readonly logs: readonly string[];
-  /** Rendered value of the last expression, if the code produced one. */
-  readonly value: string | undefined;
-  /** Error text when the code failed (syntax, runtime or uncaught). */
-  readonly error: string | undefined;
-  /** Set when the code called `finish(...)` to end the turn. */
-  readonly finalAnswer: string | undefined;
-  /** The step that ran, if the code was a step. */
-  readonly step: ReplStep | undefined;
-}
-
-/**
- * A step the agent named and described before it ran.
- */
+/** A step the agent named and described before it ran. */
 export interface ReplStep {
   /** The handle the agent gave the step. */
   readonly name: string;
@@ -31,13 +23,40 @@ export interface ReplStep {
   readonly description: string;
 }
 
+/** What happened while the unit ran. */
+export type ReplEvent =
+  /** The unit named itself. This arrives before the body runs. */
+  | { readonly kind: 'step'; readonly name: string; readonly description: string }
+  /** A tool ran: what it was, why it was called, and what came of it. */
+  | {
+      readonly kind: 'tool';
+      readonly tool: string;
+      readonly intent: string;
+      readonly detail: string;
+    }
+  /** The agent said something to the human. The first one ends the round. */
+  | { readonly kind: 'say'; readonly text: string }
+  /** The agent deposited something for the model to read next. */
+  | { readonly kind: 'deposit'; readonly text: string };
+
+/** What came of one unit. */
+export interface ReplOutcome {
+  /** True when the unit ran to the end without throwing. */
+  readonly ok: boolean;
+  /** The error it threw, when it threw. */
+  readonly error: string | undefined;
+  /** The step that ran, when one did. */
+  readonly step: ReplStep | undefined;
+  /** True when the agent spoke to the human: the round is over. */
+  readonly said: boolean;
+}
+
 export interface ReplPort {
   /**
-   * Run the code and report what happened.
+   * Run one unit and report what happened.
    *
-   * `onStep` is called the moment the code names its step, which is before
-   * the step's body runs: the observer learns what is being done while it
-   * is being done, not after.
+   * The events arrive while the unit runs, not after it: the human sees the
+   * step's name while the step is still working.
    */
-  exec(code: string, onStep?: (step: ReplStep) => void): Promise<ReplObservation>;
+  exec(code: string, onEvent?: (event: ReplEvent) => void): Promise<ReplOutcome>;
 }

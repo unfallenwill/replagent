@@ -1,4 +1,3 @@
-import type { ReplObservation } from '../domain/ports/repl.js';
 import type { SessionEvent } from '../domain/ports/session.js';
 import type { UiPort } from '../domain/ports/ui.js';
 
@@ -8,27 +7,65 @@ const RESUMED_NOTE = 'This session was resumed after an interruption; the model 
 /**
  * Put a recorded session back on the screen.
  *
- * Only what the human saw is replayed. The messages are the context, not the
- * transcript: the observation the model reads is a formatted block, while the
- * transcript shows the step, its logs and its value as separate folds. That
- * is why the log keeps both forms, and why this reads the structured events
- * rather than the message text.
+ * Only what the human saw is replayed. The queue and the messages are the
+ * context, not the transcript: the model reads a labelled block, while the
+ * transcript shows the step, the tools it used and what it said as separate
+ * folds. That is why the log keeps both forms, and why this reads the
+ * structured events rather than the message text.
  */
 export function replaySession(events: readonly SessionEvent[], ui: UiPort): void {
+  // Whether a step's fold is still open. The next reply has to open its own
+  // fold, and the way to say that is to close the last one.
+  let open = false;
+
   for (const event of events) {
-    if (event.type === 'message') {
-      replayMessage(event, ui);
-    } else if (event.type === 'observation') {
-      replayObservation(event.observation, ui);
-    } else if (event.type === 'note') {
-      ui.emit({ type: 'status', text: event.text });
+    switch (event.type) {
+      case 'message':
+        open = replayMessage(event, ui, open);
+        break;
+      case 'queue':
+        replayQueue(event, ui);
+        break;
+      case 'step':
+        ui.emit({ type: 'step', name: event.name, description: event.description });
+        open = true;
+        break;
+      case 'tool':
+        ui.emit({
+          type: 'tool',
+          tool: event.tool,
+          intent: event.intent,
+          detail: event.detail,
+        });
+        break;
+      case 'say':
+        ui.emit({ type: 'say', text: event.text });
+        break;
+      case 'note':
+        ui.emit({ type: 'status', text: event.text });
+        break;
+      default:
+        // The turn boundaries and the title have nothing to draw.
+        break;
     }
+  }
+
+  if (open) {
+    ui.emit({ type: 'exec-done' });
   }
 }
 
-function replayMessage(event: Extract<SessionEvent, { type: 'message' }>, ui: UiPort): void {
+/** The model's own turn: its reasoning, and the program it wrote. */
+function replayMessage(
+  event: Extract<SessionEvent, { type: 'message' }>,
+  ui: UiPort,
+  open: boolean,
+): boolean {
   const { message } = event;
   if (message.role === 'assistant') {
+    if (open) {
+      ui.emit({ type: 'exec-done' });
+    }
     const thinking = (message.thinking ?? []).map((block) => block.text).join('\n\n');
     if (thinking.length > 0) {
       ui.emit({ type: 'agent-thinking', text: thinking });
@@ -36,37 +73,34 @@ function replayMessage(event: Extract<SessionEvent, { type: 'message' }>, ui: Ui
     if (message.text.length > 0) {
       ui.emit({ type: 'agent-code', text: message.text });
     }
-    return;
+    return message.text.length > 0;
   }
   if (event.origin === 'human') {
     ui.emit({ type: 'user-message', text: message.text });
-    return;
+    return open;
   }
   if (event.origin === 'resume') {
     ui.emit({ type: 'status', text: RESUMED_NOTE });
   }
+  return open;
 }
 
-function replayObservation(observation: ReplObservation, ui: UiPort): void {
-  if (observation.step !== undefined) {
-    ui.emit({
-      type: 'step',
-      name: observation.step.name,
-      description: observation.step.description,
-    });
-  }
-  ui.emit({ type: 'exec-done' });
-  const logs = Array.isArray(observation.logs) ? observation.logs : [];
-  for (const log of logs) {
-    ui.emit({ type: 'repl-log', text: log });
-  }
-  if (typeof observation.value === 'string') {
-    ui.emit({ type: 'repl-value', text: observation.value });
-  }
-  if (typeof observation.error === 'string') {
-    ui.emit({ type: 'repl-error', text: observation.error });
-  }
-  if (typeof observation.finalAnswer === 'string') {
-    ui.emit({ type: 'final', text: observation.finalAnswer });
+/**
+ * What went into the request.
+ *
+ * The human's words are the human's, and are shown as such. An error the
+ * runtime put in the queue is shown too: the model read it, and so should
+ * the human. What the model deposited is its own conclusion, and stays its
+ * own.
+ */
+function replayQueue(event: Extract<SessionEvent, { type: 'queue' }>, ui: UiPort): void {
+  for (const entry of event.entries) {
+    if (entry.origin === 'human') {
+      ui.emit({ type: 'user-message', text: entry.text });
+      continue;
+    }
+    if (entry.origin === 'error') {
+      ui.emit({ type: 'repl-error', text: entry.text });
+    }
   }
 }

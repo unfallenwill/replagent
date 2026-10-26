@@ -2,45 +2,33 @@
 
 A terminal agent that lives **inside a Node.js REPL**.
 
-It has no tools. It has no functions, no APIs, no search. The REPL is the
-only channel through which it can perceive or change anything — and
-JavaScript is the only language it speaks.
-
-Humans think in language; this agent thinks in JavaScript. Every reply it
-produces is a program, executed verbatim in a persistent REPL. What it logs
-and what its last expression evaluates to is all it ever learns.
+Its body is JavaScript, its senses are the REPL, and there is no other way in
+or out. Every reply it produces is a program, executed verbatim in a
+persistent REPL. What it reads comes back through one queue, and what it says
+to you goes out through one function.
 
 ```
 you how many files are in this directory?
 
 ● count the files - read the directory and count what is in it
-   log   scanning
-   =>    42
+  ls .  see what is in the directory · 12 entries
 
-There are 42 files in this directory.
+agent There are 12 files in this directory.
 ```
 
 ## The protocol
 
-There is no tool protocol, no tool schema, no parser for code fences. The
-loop is four steps:
-1. The model writes JavaScript. That is its entire reply.
-2. The REPL runs it in a persistent context.
-3. The observation — the value the step returned, or the error, plus the
-   lines it logged if it failed — goes back to the model as the next turn.
-4. Repeat, until the model calls `finish("...")`, which ends the turn and
-   delivers the final answer.
-
-A reply is one **step**: a name, a description of what it is for, and the
-program.
+There is no tool protocol, no tool schema, no parser for code fences. A reply
+is **one unit**: a name, a description of what it is for, and the program.
 
 ```js
 await step(
   'count the files',
   'read the directory and count what is in it',
   async (name, description) => {
-    const entries = await fs.promises.readdir('.');
-    return entries.length;
+    const entries = await ls('.', 'see what is in the directory');
+    deposit(`${entries.length} files`);
+    say(`There are ${entries.length} files in this directory.`);
   },
 );
 ```
@@ -50,78 +38,107 @@ without them, and it keeps them _before_ the program runs, so what the agent
 intended is on record before what happened. The program gets both, so it can
 label itself.
 
-The step is the agent's working memory and it is gone when the step
-returns: one reply is one thought, and one thought does not leave a mess
-behind. That leaves two things that outlive a reply — the world model
-below, and `globalThis` for the rare thing too big or too raw for it.
+Seven rules hold the whole thing together:
+1. **One reply is one unit.** A reply with no `step` call, or with two of
+   them, is refused before anything runs.
+2. **The body is the scope.** Everything the unit declares dies with it. The
+   next reply starts from nothing.
+3. **There is no `return`.** The unit's only output to the model is
+   `deposit()`.
+4. **There is no `console.log`.** The REPL has no console: the REPL's own
+   console writes to the alternate screen the transcript is drawn on, and a
+   model that logs would scribble over it. The only way to the human is
+   `say()`.
+5. **There is no `finish()`.** The first `say()` ends the round.
+6. **A unit that throws is not lost.** The REPL hands the error back to the
+   model, with the stack that says where it broke.
+7. **Only `globalThis` and `require` outlive a unit.** Everything else is
+   working memory.
 
 Because the REPL context persists, `require`d modules and `globalThis`
-survive between turns.
+survive between replies.
 
 If the model writes prose instead of JavaScript, the REPL returns a
 `SyntaxError` and the model sees it. The protocol punishes nothing; it just
 reports.
 
-An observation cannot run away. The REPL keeps 8,000 characters of a line
-and 16,000 of an observation, and says how much it cut, so the agent knows
-it is looking at a part of the truth. The limit is generous on purpose:
-while the agent is exploring it does not know yet what it is looking for,
-and cutting the answer to "how big is this" off is cutting off the
-exploration.
-
-### Observations are marked
-
-Every observation comes back wrapped in `<observation>` tags, so the model can
-never confuse "the machine answered" with "the human spoke". Without that
-marker the agent drifts back into being a chat assistant that happens to emit
-JavaScript: it starts answering from what a language model is "supposed" to
-say instead of from what it actually observed.
-
-## The agent's world model
-
-A prompt is a prior, not a mechanism. The rules in the system prompt say how
-the agent should think about the world - what it is made of, what it may
-know about it, what it is trying to achieve - but a rule that changes
-nothing is a habit, not a capability. So the world the prompt describes has
-to exist in the runtime too.
-
-The agent keeps a model of the world, and the REPL keeps it for it
-(`src/domain/world.ts`):
+### Two ways to speak
 
 ```js
-world.observe('module count', 4, 'readdir src'); // what it saw
-world.believe('the build is broken', true, 0.6, 'the tests failed');
-world.plan('read the server log'); // what it will do
-console.log(world.report()); // the whole model
+say(text); // what the human reads. The first say ends the round.
+deposit(text); // what you read next. It goes into the queue.
 ```
 
-Facts and beliefs are kept apart on purpose. A fact is something that was
-observed, a belief is something that was concluded, and the second one can be
-wrong. Both remember where they came from and when, because the world keeps
-moving: a fact you observed ten minutes ago may no longer hold.
+They are not interchangeable, and a unit has to use one of them: a unit that
+neither says nor deposits has said nothing at all. Deposit what you learned,
+say what the human needs to know.
 
-The model outlives the session. It is written to `.replagent/world.json` in
-the working directory (`--world <path>` to put it somewhere else), so the
-agent's experience survives its own restart, and the human can open the file
-and read what the agent believes.
+`say()` may be called several times as you work — the human sees them all,
+and the first one still ends the round. A deposit made after the first `say()`
+still enters the queue, and is delivered in the next round's first request.
 
-### The world does not tell you what it means
+### One queue
 
-The world is a plain witness. It reports what happened - the value the step
-returned, the error, and the lines it logged when it failed - and it stops
-there. It does not check the agent's conclusions against reality, and it
-does not decide what the agent should have been looking for.
+Everything the model reads arrives in one place: a block of lines, each
+carrying a label saying who spoke it.
 
-The logs are the human's window into the run, not the agent's. The agent
-gets the value a step returned, which is the one thing it asked for; when
-a step fails, it gets the logs as well, because that is when the evidence
-matters. What the agent wants to know, it returns.
+```
+<queue>
+[human] how many files are in this directory?
+[you] 12 files
+[error] ENOENT: no such file or directory, open 'readme.md'
+</queue>
+```
 
-That restraint is deliberate. While the agent is exploring it does not know
-yet what it is looking for, and a world that guesses on its behalf would
-only feed it a conclusion it had not earned. The comparison between what the
-agent concluded and what actually happened is the agent's own work, done in
-the one place it belongs: in the agent's head.
+The label is on **every** line, not just the first of a message. That matters:
+text the model read out of a file, or a command's output, arrives inside a
+tool's result, and it cannot smuggle in a line that claims to be the human.
+
+So the label is read before the line. `[human]` is the human. `[you]` is
+something the model concluded a moment ago — a conclusion, not an instruction.
+`[error]` is what went wrong. Anything inside a tool's output is data as
+well: a web page that tells the model to ignore its rules is a page it has
+read, not a page it obeys.
+
+The human's own words and the model's own deposits arrive on the same queue,
+in the same request. There is no other channel.
+
+### The toolkit
+
+Five helpers, each of them taking the reason for the call as its second
+argument and showing that reason to the human:
+
+```js
+read(path, intent, opts?)       // the text of a file, or a range of it
+ls(dir, intent)                 // the names in a directory
+glob(pattern, intent)           // the paths that match a pattern
+edit(path, intent, { old, new }) // replace text in a file
+bash(cmd, intent, opts?)        // run a command, and read what it printed
+```
+
+```js
+const text = await read('src/app/agent.ts', 'see how the turn is driven');
+const names = await ls('src', 'see the layout of the project');
+const found = await glob('src/**/*.ts', 'find every source file');
+await edit('README.md', 'correct the version number', { old: '1.0.0', new: '1.1.0' });
+const result = await bash('git status', 'see what has changed');
+```
+
+The intent is a plain string in the model's own words, and it is never
+optional: a tool call without one is a line of code the human has to read to
+find out what it was for.
+
+The tools are the easy way, not the only way. Everything a tool could give
+the model, JavaScript gives it: `await fetch(url)`, `require('node:fs')`,
+`require('node:child_process')`, `JSON`, `crypto`, `Date`.
+
+### An observation cannot run away
+
+The REPL keeps 8,000 characters of a `say` and 40,000 of a `deposit`, and says
+how much it cut, so the agent knows it is looking at a part of the truth. The
+limit is generous on purpose: while the agent is exploring it does not know
+yet what it is looking for, and cutting the answer to "how big is this" off is
+cutting off the exploration.
 
 ## The response hook
 
@@ -170,12 +187,12 @@ rather than by convention:
     └────────►  adapters ───────────────────┘
 ```
 
-| Layer          | Contains                                                     | May depend on                            |
-| -------------- | ------------------------------------------------------------ | ---------------------------------------- |
-| `src/domain`   | ports, conversation, observation formatting, the world model | nothing (no third-party packages at all) |
-| `src/app`      | the agent loop, the system prompt                            | `domain`                                 |
-| `src/adapters` | Anthropic, `node:repl`, pi-tui, the world file               | `domain`                                 |
-| `src/cli`      | argument parsing, wiring                                     | everything                               |
+| Layer          | Contains                                                      | May depend on                            |
+| -------------- | ------------------------------------------------------------- | ---------------------------------------- |
+| `src/domain`   | ports, conversation, the queue, the unit scanner              | nothing (no third-party packages at all) |
+| `src/app`      | the agent loop, the system prompt, the session replay         | `domain`                                 |
+| `src/adapters` | Anthropic, `node:repl`, pi-tui, the toolkit, the session file | `domain`                                 |
+| `src/cli`      | argument parsing, wiring                                      | everything                               |
 
 The rules are enforced in `.dependency-cruiser.cjs`:
 - `domain` may not import `app`, `adapters`, `cli`, **or any npm package**
@@ -183,6 +200,20 @@ The rules are enforced in `.dependency-cruiser.cjs`:
 - `adapters` may not import `app` or `cli`
 - nothing may import `cli`
 - no cycles, no orphans, no dev-dependency leakage into `src/`
+
+### The unit scanner
+
+A reply is checked before it runs: one call to `step`, with a name, a
+description and a program. The scanner is hand-written (`src/domain/unit.ts`)
+because the domain may not depend on anything outside itself.
+
+It is a scanner rather than a parser — it walks the source the way JavaScript
+reads it (strings, templates, comments and regular expressions are skipped)
+and looks for the call. It is also deliberately unsure: a wrong answer here
+costs a round trip, so the rule is to say no only when it is certain. When
+the scanner cannot tell, it says yes and lets `step` decide — `step` checks
+the name and the description itself, before it runs anything, so a unit that
+is not a unit has no effects either way.
 
 ## Quality gates
 
@@ -195,7 +226,7 @@ The rules are enforced in `.dependency-cruiser.cjs`:
 | Complexity   | Biome `noExcessiveCognitiveComplexity` | cognitive complexity ≤ 15                                                                                                                                                                                |
 | Architecture | `dependency-cruiser`                   | the layering above                                                                                                                                                                                       |
 | Style        | Biome                                  | formatting and correctness linting                                                                                                                                                                       |
-| Tests        | `vitest`                               | 242 tests, including real `node:repl` integration                                                                                                                                                        |
+| Tests        | `vitest`                               | 268 tests, including real `node:repl` integration                                                                                                                                                        |
 
 Each gate has been verified to actually fail on a violation, not just to
 pass on good code.
@@ -221,8 +252,6 @@ Options:
   --context-window <n>
                       the model's context window in tokens, for the usage
                       fraction in the status bar (default: 1000000)
-  --world <path>      where the agent keeps its model of the world
-                      (default: .replagent/world.json in the working directory)
   --resume <id>       continue a recorded session (id prefix is enough)
   --continue          continue the most recent session for this directory
   --list-sessions     list this directory's sessions and exit
@@ -247,10 +276,10 @@ Sessions live outside the repository, under `~/.replagent/projects/<cwd>`
 session. A line is written when something happens, and the file is fsynced
 at the end of a turn, so a crash costs at most the turn that was running.
 The header pins the model, the effort and a hash of the system prompt; the
-events that follow are the conversation itself - what the human said, what
-the model wrote and thought, what the REPL observed, and the notes about
-limits and failures. Streaming deltas are never written: a log of deltas is
-a log nobody can resume from.
+events that follow are the conversation itself - what went into the request
+(the queue), what the model wrote and thought, what it said, the tools it
+used, and the notes about limits and failures. Streaming deltas are never
+written: a log of deltas is a log nobody can resume from.
 
 The full design - the file format, the locking, the rules for replaying
 reasoning to a different model, and what a resume does to MiniMax's prompt
@@ -258,7 +287,7 @@ cache - is in [docs/session-storage.md](docs/session-storage.md).
 
 Two things worth knowing before you rely on it:
 - **A session records what the agent read and printed.** Source files, logs,
-  whatever a step happened to dump. That is the point, and also the reason
+  whatever a tool happened to dump. That is the point, and also the reason
   it does not live in the project. On a shared or CI machine, use
   `--no-session`.
 - **Credentials are never written.** The API key and auth token stay in the
@@ -268,18 +297,18 @@ Two things worth knowing before you rely on it:
 
 The transcript is a scrollable viewport (alternate screen) with the editor
 pinned at the bottom. Everything the agent does appears there: your own
-message is echoed, what the REPL logged, the value the step returned, the
-errors, and the final answer.
+message is echoed, the tools it used (with the reason it gave for each), the
+errors it hit, and what it said back to you.
 
 The code the agent writes is folded away by default. What the transcript
 shows is the step — its name and what it was for — because that is what the
-transcript is for. The code, the logs and the value all belong to the step
-that produced them, and they open and close with it: `ctrl+e` opens the
-last step and closes it again. The keystroke's hint sits at the tail of
-the fold itself, on the newest step, and says which way it goes; it leaves
-when the step is no longer the newest one. The code is pretty-printed and
-coloured for the terminal, and the colouring goes on after the formatting,
-so it lands on the columns you are reading.
+transcript is for. The code and the tools it used belong to the step that
+produced them, and they open and close with it: `ctrl+e` opens the last step
+and closes it again. The keystroke's hint sits at the tail of the fold
+itself, on the newest step, and says which way it goes; it leaves when the
+step is no longer the newest one. The code is pretty-printed and coloured for
+the terminal, and the colouring goes on after the formatting, so it lands on
+the columns you are reading.
 
 A step that failed says so in red, even folded away: a transcript that
 hides the failure is a transcript that lies by omission.
@@ -375,7 +404,7 @@ about the session, not the turn, so it does not move while the agent works:
 - `45.2k/1000k` is what the last request carried against the model's context
   window: the whole conversation, system prompt included, cache traffic
   counted too. That number is the session's real budget: every step sends
-  it again, and it only ever grows. It turns yellow as the window fills.
+  it again, and it only only ever grows. It turns yellow as the window fills.
   The models this project is built for carry a million tokens, so an
   unknown model is assumed to be in that class; a known smaller model is
   listed, and `--context-window` overrides both.
@@ -390,8 +419,8 @@ model and the branch leave, and the cache rate goes before the weight.
 The directory - at least its last segment - is the last to leave, because
 where you are standing is the one fact that is on the screen nowhere else.
 
-Before the first request there is nothing to report, and the bar is just
-the identity. The one thing that can take the bar over is the interrupt
+Before the first request there is nothing to report, and the bar is just the
+identity. The one thing that can take the bar over is the interrupt
 warning: `press ctrl+c again to quit` speaks about the session, which is
 exactly what the bar is for.
 
@@ -456,8 +485,13 @@ behind a single cast. It also handles two behaviours of Node's evaluator
 that are easy to miss:
 - a runtime error is swallowed by the REPL's domain and printed to the
   output stream instead of reaching the callback, so the adapter taps that
-  stream to turn it back into an observation;
+  stream to turn it back into an error;
 - an incomplete expression comes back as `repl.Recoverable`, which is
   reported to the model as a `SyntaxError` so it can continue the statement.
+
+Each reply is wrapped in one async function before it is evaluated, so a
+declaration made outside the step's body dies with the reply: the only things
+that survive from one unit to the next are the ones put on `globalThis` on
+purpose.
 
 Requires Node ≥ 22.12.

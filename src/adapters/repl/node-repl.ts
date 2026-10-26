@@ -1,13 +1,11 @@
-import { Console } from 'node:console';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import process from 'node:process';
 import repl from 'node:repl';
-import { PassThrough, Writable } from 'node:stream';
-import type { Context } from 'node:vm';
-import type { ReplObservation, ReplPort, ReplStep } from '../../domain/ports/repl.js';
-import type { WorldPort, WorldState } from '../../domain/ports/world.js';
-import { addBelief, addFact, formatWorld, setPlan } from '../../domain/world.js';
+import { PassThrough } from 'node:stream';
+import { type Context, runInContext } from 'node:vm';
+import type { ReplEvent, ReplOutcome, ReplPort, ReplStep } from '../../domain/ports/repl.js';
+import { createToolkit } from '../toolkit/index.js';
 
 /**
  * Node 24 changed the public shape of `REPLServer.prototype.eval` to
@@ -38,6 +36,22 @@ type EvalOutcome =
   | { readonly kind: 'error'; readonly message: string }
   | { readonly kind: 'incomplete'; readonly message: string };
 
+/** The body of a step: it gets its own name and description. */
+type StepBody = (name: string, description: string) => unknown;
+
+/** How much one deposit may carry into the next request. */
+const MAX_DEPOSIT_CHARS = 40_000;
+
+/** How much one thing said to the human may be. */
+const MAX_SAY_CHARS = 8000;
+
+export interface NodeReplOptions {
+  /** Directory `require` resolves from, and where the tools work. Defaults to the process cwd. */
+  readonly cwd?: string;
+  /** File name used in stack traces. */
+  readonly filename?: string;
+}
+
 /**
  * Wait for a promise the program handed back.
  *
@@ -52,8 +66,7 @@ async function settleValue(value: unknown): Promise<EvalOutcome> {
   try {
     return { kind: 'ok', value: await value };
   } catch (error) {
-    const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
-    return { kind: 'error', message };
+    return { kind: 'error', message: errorText(error) };
   }
 }
 
@@ -62,6 +75,18 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
     return false;
   }
   return typeof (value as PromiseLike<unknown>).then === 'function';
+}
+
+/**
+ * The message of an error, as the model should read it.
+ *
+ * The stack is kept: where it broke is half of what the model needs to know.
+ */
+function errorText(error: unknown): string {
+  if (error instanceof Error) {
+    return error.stack ?? error.message;
+  }
+  return String(error);
 }
 
 /**
@@ -89,57 +114,48 @@ function cut(text: string, limit: number): string {
 }
 
 /**
- * Cut a run of lines down to what one observation may say.
+ * The unit, wrapped so that it is one scope.
+ *
+ * A reply is one call to `step`, but the model can put anything around it.
+ * Wrapping the whole reply in one async function means a declaration made
+ * outside the step's body dies with the reply: the only things that survive
+ * from one unit to the next are the ones put on `globalThis` on purpose.
+ *
+ * The code starts on the first line, so a stack trace still points at the
+ * line the model wrote.
  */
-function trimLogs(logs: readonly string[]): string[] {
-  let total = 0;
-  const kept: string[] = [];
+function wrapUnit(code: string): string {
+  return `(async () => {${code}\n})()`;
+}
 
-  for (const log of logs) {
-    if (total + log.length > MAX_OBSERVATION_CHARS) {
-      kept.push(`… ${logs.length - kept.length} more lines were cut`);
-      return kept;
-    }
-    kept.push(log);
-    total += log.length;
+/**
+ * What a helper was given to say.
+ *
+ * A helper with nothing to say has nothing to do either: an empty deposit
+ * is a mistake, and a mistake the model cannot see is a mistake it repeats.
+ */
+function spoken(text: unknown, helper: 'say' | 'deposit'): string {
+  const value = typeof text === 'string' ? text : String(text);
+  if (value.trim().length === 0) {
+    throw new Error(
+      helper === 'say'
+        ? 'say needs something to say: say("what the human should read").'
+        : 'deposit needs something to deposit: deposit("what you want to read next turn").',
+    );
   }
-
-  return kept;
+  return value;
 }
 
-export interface NodeReplOptions {
-  /** Directory `require` resolves from. Defaults to the process cwd. */
-  readonly cwd?: string;
-  /** File name used in stack traces. */
-  readonly filename?: string;
-  /** Where the agent's model of the world is kept. */
-  readonly world: WorldPort;
+/** The error of a run, from whichever of the two paths failed. */
+function errorOf(outcome: EvalOutcome, settled: EvalOutcome): string | undefined {
+  if (outcome.kind !== 'ok') {
+    return outcome.message;
+  }
+  if (settled.kind !== 'ok') {
+    return settled.message;
+  }
+  return undefined;
 }
-
-/** The body of a step: it gets its own name and description. */
-type StepBody = (name: string, description: string) => unknown;
-
-/**
- * How much of one line the REPL keeps.
- *
- * An observation is the agent's only sense and also its context: a value
- * dumped in full costs more than the whole conversation, and buries the
- * one line in it that mattered.
- *
- * The limit is generous on purpose. While the agent is exploring it does
- * not know yet what it is looking for, and cutting the answer to "how big
- * is this" off is cutting off the exploration. The limit is there to stop
- * a flood, not to ration the view.
- */
-const MAX_LINE_CHARS = 8000;
-
-/**
- * How much one observation may say in total.
- *
- * A program that logs a thousand lines is a program that wants to be
- * summarised, not quoted.
- */
-const MAX_OBSERVATION_CHARS = 16000;
 
 /**
  * A persistent Node REPL, used as the agent's world.
@@ -147,20 +163,23 @@ const MAX_OBSERVATION_CHARS = 16000;
  * One `repl.REPLServer` with its own context: `let`/`const`, required modules
  * and top level await survive between calls, exactly like the interactive
  * REPL, because we drive Node's own evaluator.
+ *
+ * The context holds the three helpers the protocol has - `step`, `deposit`
+ * and `say` - and the toolkit. It does not hold a console: the REPL's own
+ * console writes to the process stdout, which is the alternate screen the
+ * transcript lives on, and a model that logs would scribble over it.
  */
 export class NodeReplSession implements ReplPort {
   readonly #server: repl.REPLServer;
   readonly #context: Context;
   readonly #eval: NodeEval;
   readonly #filename: string;
-  readonly #logs: string[] = [];
-  readonly #worldPort: WorldPort;
-  #worldState: WorldState;
-  #finalAnswer: string | undefined;
   #execToken = 0;
+  #onEvent: ((event: ReplEvent) => void) | undefined;
   #onUncaught: ((text: string) => void) | undefined;
-  #onStep: ((step: ReplStep) => void) | undefined;
   #step: ReplStep | undefined;
+  #stepPromise: Promise<unknown> | undefined;
+  #said = false;
 
   constructor(options: NodeReplOptions) {
     const input = new PassThrough();
@@ -178,49 +197,36 @@ export class NodeReplSession implements ReplPort {
     this.#context = this.#server.context;
     this.#eval = this.#server.eval.bind(this.#server) as unknown as NodeEval;
     this.#filename = options.filename ?? 'replagent';
-    this.#worldPort = options.world;
-    this.#worldState = options.world.read();
 
-    this.#installConsole();
-    this.#installRequire(options.cwd ?? process.cwd());
-    this.#installWorld();
+    const cwd = options.cwd ?? process.cwd();
+    this.#removeConsole();
+    this.#installRequire(cwd);
+    this.#installToolkit(cwd);
     this.#installStep();
     this.#tapUncaught(output);
   }
 
-  async exec(code: string, onStep?: (step: ReplStep) => void): Promise<ReplObservation> {
+  async exec(code: string, onEvent?: (event: ReplEvent) => void): Promise<ReplOutcome> {
     this.#execToken += 1;
     const token = this.#execToken;
-    this.#logs.length = 0;
-    this.#finalAnswer = undefined;
+    this.#onEvent = onEvent;
     this.#step = undefined;
-    this.#onStep = onStep;
-    this.#installFinish(token);
+    this.#stepPromise = undefined;
+    this.#said = false;
+    this.#installTalkers(token);
 
-    const outcome = await this.#evaluate(code);
-    // A step named by code that outlived its evaluation belongs to nobody.
-    this.#onStep = undefined;
-    const logs = trimLogs([...this.#logs]);
-    const step = this.#step;
-
-    if (outcome.kind !== 'ok') {
-      return {
-        ok: false,
-        logs,
-        value: undefined,
-        error: cut(outcome.message, MAX_LINE_CHARS),
-        finalAnswer: undefined,
-        step,
-      };
-    }
+    const outcome = await this.#evaluate(wrapUnit(code));
+    // The unit may not have awaited its own step. The REPL waits for the
+    // work either way, so a body that is still running cannot outlive the
+    // turn and leave its deposits behind.
+    const settled = await settleValue(this.#stepPromise);
+    this.#onEvent = undefined;
 
     return {
-      ok: true,
-      logs,
-      value: this.#render(outcome.value),
-      error: undefined,
-      finalAnswer: this.#finalAnswer,
-      step,
+      ok: outcome.kind === 'ok' && settled.kind === 'ok',
+      error: errorOf(outcome, settled),
+      step: this.#step,
+      said: this.#said,
     };
   }
 
@@ -232,7 +238,7 @@ export class NodeReplSession implements ReplPort {
   /**
    * Run the code, then wait for what it hands back.
    *
-   * A reply is a self-executing closure, and an async one hands back a
+   * A unit is a self-executing closure, and an async one hands back a
    * promise. The REPL waits for it, so the agent's answer arrives as a
    * value and not as a pending promise, and a rejected promise becomes an
    * error the agent can read.
@@ -286,90 +292,46 @@ export class NodeReplSession implements ReplPort {
     });
   }
 
-  #render(value: unknown): string | undefined {
-    if (value === undefined) {
-      return undefined;
-    }
-    return cut(this.#server.writer(value) ?? String(value), MAX_LINE_CHARS);
+  #emit(event: ReplEvent): void {
+    this.#onEvent?.(event);
   }
 
   /**
-   * The agent's console.
+   * Take the console away.
    *
-   * It is Node's own console, pointed at a sink that captures what is
-   * written. The agent gets the console it already knows - format
-   * specifiers, `console.table`, `console.dir`, `console.count` - and every
-   * line it writes becomes an observation.
+   * The REPL gives the model a console of its own, pointed at the process
+   * stdout - which is the alternate screen the transcript is drawn on. A
+   * model that logs would scribble over the screen, so the console is
+   * removed rather than captured: a model that writes to it gets a clean
+   * ReferenceError and learns to use `say` instead.
    */
-  #installConsole(): void {
-    const sink = new Writable({
-      write: (chunk, _encoding, callback) => {
-        this.#capture(String(chunk));
-        callback();
-      },
-    });
-
-    this.#context['console'] = new Console({ stdout: sink, stderr: sink });
-  }
-
-  /** Split what was written into the lines an observation is made of. */
-  #capture(text: string): void {
-    const lines = text.split('\n');
-    if (lines.at(-1) === '') {
-      lines.pop();
-    }
-    for (const line of lines) {
-      this.#logs.push(cut(line, MAX_LINE_CHARS));
-    }
+  #removeConsole(): void {
+    runInContext('delete globalThis.console', this.#context);
   }
 
   /**
-   * `finish` is rebound for every turn.
+   * `deposit` and `say` are rebound for every turn.
    *
-   * The binding captures the turn it belongs to, so a `finish()` that arrives
+   * The binding captures the turn it belongs to, so a `say()` that arrives
    * late (from a timer started in an earlier turn) cannot end the current
-   * one. Within a turn the first `finish()` wins - it ends the turn, and
-   * anything after it is ignored.
+   * one.
    */
-  #installFinish(token: number): void {
-    this.#context['finish'] = (answer: unknown): void => {
+  #installTalkers(token: number): void {
+    this.#context['say'] = (text: unknown): void => {
       if (token !== this.#execToken) {
         return;
       }
-      if (this.#finalAnswer !== undefined) {
+      const said = spoken(text, 'say');
+      this.#said = true;
+      this.#emit({ kind: 'say', text: cut(said, MAX_SAY_CHARS) });
+    };
+
+    this.#context['deposit'] = (text: unknown): void => {
+      if (token !== this.#execToken) {
         return;
       }
-      this.#finalAnswer =
-        typeof answer === 'string' ? answer : (this.#render(answer) ?? String(answer));
-    };
-  }
-
-  /**
-   * The agent's model of the world, in the REPL.
-   *
-   * Facts and beliefs are kept apart on purpose: what was observed is not
-   * what was concluded, and the agent has to be able to tell them apart
-   * when it looks at its own model later.
-   */
-  #installWorld(): void {
-    this.#context['world'] = {
-      observe: (name: string, value: unknown, source: string): void => {
-        this.#keep(addFact(this.#worldState, name, value, source, new Date().toISOString()));
-      },
-      believe: (name: string, value: unknown, confidence: number, source?: string): void => {
-        this.#keep(
-          addBelief(
-            this.#worldState,
-            name,
-            value,
-            confidence,
-            source ?? 'concluded',
-            new Date().toISOString(),
-          ),
-        );
-      },
-      state: (): WorldState => this.#worldState,
-      report: (): string => formatWorld(this.#worldState),
+      const note = spoken(text, 'deposit');
+      this.#emit({ kind: 'deposit', text: cut(note, MAX_DEPOSIT_CHARS) });
     };
   }
 
@@ -383,7 +345,7 @@ export class NodeReplSession implements ReplPort {
    * the body gets both, so it can label itself.
    */
   #installStep(): void {
-    this.#context['step'] = async (
+    this.#context['step'] = (
       name: unknown,
       description: unknown,
       body: unknown,
@@ -408,16 +370,43 @@ export class NodeReplSession implements ReplPort {
       this.#step = step;
       // The observer hears the name before the body runs: that is the whole
       // point of naming the step first.
-      this.#onStep?.(step);
-      this.#keep(setPlan(this.#worldState, { name, description }));
+      this.#emit({ kind: 'step', name, description });
 
-      return await (body as StepBody)(name, description);
+      const promise = (async () => (body as StepBody)(name, description))();
+      this.#stepPromise = promise;
+      // The failure is reported through the outcome, so the promise must
+      // never be left unhandled: a unit that forgot to await its step would
+      // otherwise take the whole process down with it.
+      promise.catch(() => undefined);
+      return promise;
     };
   }
 
-  #keep(state: WorldState): void {
-    this.#worldState = state;
-    this.#worldPort.write(state);
+  /**
+   * The tools.
+   *
+   * They are the same functions the toolkit is, mounted on the context: a
+   * helper that reports what it did becomes a line in the transcript, and
+   * the reason it was called is part of that line.
+   */
+  #installToolkit(cwd: string): void {
+    const toolkit = createToolkit({
+      cwd,
+      onAction: (action) => {
+        this.#emit({
+          kind: 'tool',
+          tool: action.tool,
+          intent: action.intent,
+          detail: action.detail,
+        });
+      },
+    });
+
+    this.#context['read'] = toolkit.read;
+    this.#context['ls'] = toolkit.ls;
+    this.#context['glob'] = toolkit.glob;
+    this.#context['edit'] = toolkit.edit;
+    this.#context['bash'] = toolkit.bash;
   }
 
   #installRequire(cwd: string): void {

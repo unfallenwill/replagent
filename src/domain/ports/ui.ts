@@ -28,18 +28,24 @@ export type UiEvent =
   /** The step that ran: the name the agent gave it and what it was for. */
   | { readonly type: 'step'; readonly name: string; readonly description: string }
   /**
+   * A tool ran. The intent is the agent's own words about why it called the
+   * tool, and it is the reason the toolkit asks for one.
+   */
+  | {
+      readonly type: 'tool';
+      readonly tool: string;
+      readonly intent: string;
+      readonly detail: string;
+    }
+  /**
    * The code finished running. Emitted even when the observation says
    * nothing, so the step's line can settle instead of spinning forever.
    */
   | { readonly type: 'exec-done' }
-  /** A line the agent's code logged. */
-  | { readonly type: 'repl-log'; readonly text: string }
-  /** The value the agent's step returned. */
-  | { readonly type: 'repl-value'; readonly text: string }
+  /** What the agent said to the human. */
+  | { readonly type: 'say'; readonly text: string }
   /** The agent's code failed. */
   | { readonly type: 'repl-error'; readonly text: string }
-  /** The agent called `finish(...)`. */
-  | { readonly type: 'final'; readonly text: string }
   /** Neutral information about the run (limits, truncation, retries). */
   | { readonly type: 'status'; readonly text: string }
   /** The agent started (or stopped) working on a turn. */

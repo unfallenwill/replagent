@@ -1,5 +1,6 @@
 import {
   appendFileSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -17,7 +18,6 @@ const start: SessionStart = {
   effort: 'max',
   maxTokens: 131_072,
   maxSteps: 24,
-  world: '.replagent/world.json',
   systemPromptHash: 'sha256:test',
   agent: 'replagent',
 };
@@ -42,7 +42,7 @@ describe('JsonlSessionStore', () => {
   it('round-trips a session through the file', () => {
     const writer = store.create(start);
     writer.append({ type: 'turn.start' });
-    writer.append({ type: 'message', origin: 'human', message: { role: 'user', text: 'hello' } });
+    writer.append({ type: 'queue', entries: [{ origin: 'human', text: 'hello' }] });
     writer.append({
       type: 'message',
       origin: 'assistant',
@@ -54,22 +54,9 @@ describe('JsonlSessionStore', () => {
       usage: { input: 512, output: 12, cached: 480 },
       stopReason: 'end_turn',
     });
-    writer.append({
-      type: 'observation',
-      observation: {
-        ok: true,
-        logs: [],
-        value: '1',
-        error: undefined,
-        finalAnswer: undefined,
-        step: undefined,
-      },
-    });
-    writer.append({
-      type: 'message',
-      origin: 'observation',
-      message: { role: 'user', text: '<observation>\n=> 1\n</observation>' },
-    });
+    writer.append({ type: 'step', name: 'count', description: 'count what is there' });
+    writer.append({ type: 'tool', tool: 'read', intent: 'see it', detail: 'a.txt' });
+    writer.append({ type: 'say', text: 'there is one' });
     writer.append({ type: 'turn.end', status: 'finished' });
     writer.close();
 
@@ -80,17 +67,21 @@ describe('JsonlSessionStore', () => {
       model: start.model,
       effort: start.effort,
       cwd: path.join(home, 'project'),
-      v: 1,
+      v: 2,
       type: 'session',
     });
     expect(opened.events.map((event) => event.type)).toEqual([
       'turn.start',
+      'queue',
       'message',
-      'message',
-      'observation',
-      'message',
+      'step',
+      'tool',
+      'say',
       'turn.end',
     ]);
+    expect(opened.events[1]).toMatchObject({
+      entries: [{ origin: 'human', text: 'hello' }],
+    });
     expect(opened.events[2]).toMatchObject({
       message: { thinking: [{ text: 'one is easiest', signature: 'sig' }] },
       usage: { input: 512, output: 12, cached: 480 },
@@ -100,6 +91,108 @@ describe('JsonlSessionStore', () => {
     expect(opened.ignoredLines).toBe(0);
 
     opened.writer.close();
+  });
+
+  it('keeps the queue as it was, labels and all', () => {
+    const writer = store.create(start);
+    writer.append({ type: 'turn.start' });
+    writer.append({
+      type: 'queue',
+      entries: [
+        { origin: 'human', text: 'count the files' },
+        { origin: 'model', text: 'there are three' },
+        { origin: 'error', text: 'ENOENT: no such file' },
+      ],
+    });
+    writer.close();
+
+    const opened = store.open(writer.id);
+
+    expect(opened.events[1]).toMatchObject({
+      type: 'queue',
+      entries: [
+        { origin: 'human', text: 'count the files' },
+        { origin: 'model', text: 'there are three' },
+        { origin: 'error', text: 'ENOENT: no such file' },
+      ],
+    });
+    opened.writer.close();
+  });
+
+  it('reads a file an older version wrote', () => {
+    // A v1 file named a world and kept observations. Both are read: the
+    // header still opens, and the observation is dropped rather than
+    // counted as damage.
+    const id = '20260101T000000Z-abcdef01';
+    mkdirSync(store.directory, { recursive: true });
+    const lines = [
+      {
+        v: 1,
+        type: 'session',
+        id,
+        at: '2026-01-01T00:00:00.000Z',
+        cwd: path.join(home, 'project'),
+        model: start.model,
+        effort: start.effort,
+        maxTokens: start.maxTokens,
+        maxSteps: start.maxSteps,
+        world: '.replagent/world.json',
+        systemPromptHash: start.systemPromptHash,
+        agent: start.agent,
+      },
+      { seq: 1, at: '2026-01-01T00:00:01.000Z', type: 'turn.start' },
+      {
+        seq: 2,
+        at: '2026-01-01T00:00:02.000Z',
+        type: 'message',
+        origin: 'human',
+        message: { role: 'user', text: 'hello' },
+      },
+      {
+        seq: 3,
+        at: '2026-01-01T00:00:03.000Z',
+        type: 'observation',
+        observation: { ok: true, logs: [], value: '1' },
+      },
+      { seq: 4, at: '2026-01-01T00:00:04.000Z', type: 'turn.end', status: 'finished' },
+    ];
+    writeFileSync(openByPrefix(id), `${lines.map((line) => JSON.stringify(line)).join('\n')}\n`);
+
+    const opened = store.open(id);
+
+    expect(opened.header).toMatchObject({
+      v: 1,
+      model: start.model,
+      world: '.replagent/world.json',
+    });
+    expect(opened.events.map((event) => event.type)).toEqual(['turn.start', 'message', 'turn.end']);
+    expect(opened.ignoredLines).toBe(0);
+    expect(opened.summary).toMatchObject({ turns: 1, firstUserText: 'hello' });
+
+    opened.writer.close();
+  });
+
+  it('refuses a v1 header that does not name a world', () => {
+    const id = '20260101T000001Z-abcdef02';
+    mkdirSync(store.directory, { recursive: true });
+    writeFileSync(
+      openByPrefix(id),
+      `${JSON.stringify({
+        v: 1,
+        type: 'session',
+        id,
+        at: '2026-01-01T00:00:00.000Z',
+        cwd: path.join(home, 'project'),
+        model: start.model,
+        effort: start.effort,
+        maxTokens: start.maxTokens,
+        maxSteps: start.maxSteps,
+        systemPromptHash: start.systemPromptHash,
+        agent: start.agent,
+      })}\n`,
+    );
+
+    expect(() => store.open(id)).toThrow('Not a replagent session');
   });
 
   it('continues the sequence when a session is reopened', () => {
@@ -202,7 +295,7 @@ describe('JsonlSessionStore', () => {
 
   it('lists this directory’s sessions, most recently used first', () => {
     const first = store.create(start);
-    first.append({ type: 'message', origin: 'human', message: { role: 'user', text: 'one' } });
+    first.append({ type: 'queue', entries: [{ origin: 'human', text: 'one' }] });
     first.close();
     const second = store.create(start);
     second.close();

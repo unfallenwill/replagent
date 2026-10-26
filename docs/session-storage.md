@@ -35,12 +35,11 @@ survive byte for byte because the provider accepts them back.
   eight hex characters from `crypto.randomBytes(4)` so two sessions started
   in the same second cannot collide.
 
-Sessions do **not** go in the repository under `.replagent/`. A session
-contains everything the agent read and printed - source, logs, whatever a
-step happened to dump - and a project's git history must not collect that.
-`.replagent/world.json` stays where it is: it is the agent's belief about
-_this_ project, shared by every session in it. A session records which world
-file it was using, not a copy of it.
+Sessions do **not** go in the repository. A session contains everything the
+agent read and printed - source, logs, whatever a tool happened to dump -
+and a project's git history must not collect that. There is no second file
+beside the session: the agent has no beliefs of its own to keep, only the
+queue it read and the words it said, and both are in the log.
 
 ## 2. The file
 
@@ -52,7 +51,7 @@ rewritten in place. Mode `0600`, directory `0700`.
 
 ```json
 {
-  "v": 1,
+  "v": 2,
   "type": "session",
   "id": "20261023T191005Z-844430e2",
   "at": "2026-10-23T19:10:05.120Z",
@@ -61,7 +60,6 @@ rewritten in place. Mode `0600`, directory `0700`.
   "effort": "max",
   "maxTokens": 131072,
   "maxSteps": 24,
-  "world": ".replagent/world.json",
   "systemPromptHash": "sha256:9f2c...",
   "agent": "replagent"
 }
@@ -78,17 +76,22 @@ The header is the only place a session's model and effort live. A turn
 cannot raise them, and a resume compares the header's model against the
 `--model` it was given to decide whether the reasoning may be replayed.
 
+A v1 file also carried `"world": ".replagent/world.json"`. A v2 file has no
+world to name: the world model is gone, and the queue replaced it. The
+reader still accepts a v1 header - it has to, because v1 files exist - and
+still refuses a v1 header that does not name one, so a file that is not a
+replagent session is not mistaken for one.
+
 ### Events
 
 Every event carries `seq` (1, 2, 3... in this file) and `at`:
 
 ```json
 {
-  "seq": 3,
-  "at": "2026-10-23T19:10:09.004Z",
-  "type": "message",
-  "message": { "role": "user", "text": "add a cache to the loader" },
-  "origin": "human"
+  "seq": 2,
+  "at": "2026-10-23T19:10:06.004Z",
+  "type": "queue",
+  "entries": [{ "origin": "human", "text": "add a cache to the loader" }]
 }
 ```
 
@@ -97,22 +100,23 @@ a file over one. It is per-file and monotonic; it is not a global clock.
 
 The event types:
 
-| `type`        | payload                                                               | why it is stored                                     |
-| ------------- | --------------------------------------------------------------------- | ---------------------------------------------------- |
-| `turn.start`  | `{}`                                                                  | boundaries; interruption detection                   |
-| `message`     | `{ message: { role, text, thinking? }, origin, usage?, stopReason? }` | **the context itself**, in the order it was appended |
-| `step`        | `{ name, description }`                                               | the step named itself before it ran                  |
-| `observation` | `{ observation: { ok, logs, value, error, finalAnswer, step } }`      | the transcript's folds, structurally                 |
-| `note`        | `{ text }`                                                            | limits, truncation, unwrapped tool calls             |
-| `turn.end`    | `{ status }`                                                          | `finished · cancelled · limit · rejected · error`    |
-| `title`       | `{ text }`                                                            | a human's name for the session; last one wins        |
+| `type`       | payload                                                               | why it is stored                                         |
+| ------------ | --------------------------------------------------------------------- | -------------------------------------------------------- |
+| `turn.start` | `{}`                                                                  | boundaries; interruption detection                       |
+| `queue`      | `{ entries: [{ origin, text }] }`                                     | **what went into the request**                           |
+| `message`    | `{ message: { role, text, thinking? }, origin, usage?, stopReason? }` | **the context itself**, in the order it was appended     |
+| `step`       | `{ name, description }`                                               | the step named itself before it ran                      |
+| `tool`       | `{ tool, intent, detail }`                                            | what the step did, and why it said it was doing it       |
+| `say`        | `{ text }`                                                            | what the agent said to the human                         |
+| `note`       | `{ text }`                                                            | limits, truncation, unwrapped tool calls                 |
+| `turn.end`   | `{ status }`                                                          | `finished · cancelled · limit · rejected · error · idle` |
+| `title`      | `{ text }`                                                            | a human's name for the session; last one wins            |
 
 `origin` says whose message it is and how the replay should draw it:
-`human` (echo it as the human's turn), `assistant` (the model's code and
-reasoning), `observation` (what the model reads back, not something the
-human typed), `resume` (the note a resume added). It is on the event, not on
-the `LlmMessage`, because the message itself must stay exactly what went to
-the provider.
+`human` (echo it as the human's turn), `assistant` (the model's program and
+reasoning), `observation` and `resume` (v1 only - what the model read back,
+and the note a resume added). It is on the event, not on the `LlmMessage`,
+because the message itself must stay exactly what went to the provider.
 
 A `message` event carries the assistant call's metadata beside the message -
 `usage` and `stopReason` - so the log answers "what did this cost" without a
@@ -121,35 +125,49 @@ second event type. The model and effort are the header's, not each turn's.
 ### The principle behind the split
 
 Two kinds of truth are stored side by side:
-- **`message` events are normative.** They are exactly the values handed to
-  `Conversation.append` - the user's text, the assistant's code with its
-  reasoning blocks and signatures, the observation string the model will
-  read. Replaying them through the same `append` reproduces the live
-  `Conversation` exactly, including the merge of consecutive same-role turns.
-- **The rest is for the human.** `step`, `observation` and `note` let a
-  resumed session repaint the transcript's folds; `turn.*` and `usage` answer
-  what happened and what it cost. None of them is needed to rebuild context,
-  and losing them degrades the display, not the conversation.
+- **`queue` and `message` events are normative.** They are exactly the values
+  handed to `Conversation.append` - the labelled block the model read, and
+  the assistant's program with its reasoning blocks and signatures. Replaying
+  them through the same `append` reproduces the live `Conversation` exactly,
+  including the merge of consecutive same-role turns.
+- **The rest is for the human.** `step`, `tool`, `say` and `note` let a
+  resumed session repaint the transcript's folds; `turn.*` and `usage`
+  answer what happened and what it cost. None of them is needed to rebuild
+  context, and losing them degrades the display, not the conversation.
 
-This is why the log stores the formatted observation (inside `message`) _and_
-its structured form (`observation`). They are not redundant: one is what the
-model saw, the other is what the terminal drew. The formatted string is the
-only one that guarantees a byte-identical prompt on resume, which is also
-what a prompt cache matches on.
+A `queue` event stores the **entries**, not the text that was rendered from
+them. The rendering is a pure function of the entries - `formatQueue` labels
+every line - so the entries are the smaller and more faithful form: a resume
+rebuilds the request exactly, labels included, and the log cannot disagree
+with the model about what it was told.
 
 ### Sample
 
 ```jsonl
-{"v":1,"type":"session","id":"20261023T191005Z-844430e2",...}
+{"v":2,"type":"session","id":"20261023T191005Z-844430e2",...}
 {"seq":1,"at":"...","type":"turn.start"}
-{"seq":2,"at":"...","type":"message","message":{"role":"user","text":"add a cache to the loader"},"origin":"human"}
-{"seq":3,"at":"...","type":"step","name":"read the loader","description":"see how it fetches"}
-{"seq":4,"at":"...","type":"message","message":{"role":"assistant","text":"await step(...)","thinking":[{"text":"...","signature":"sig"}]},"origin":"assistant","usage":{"input":5120,"output":140,"cached":4800},"stopReason":"end_turn"}
-{"seq":5,"at":"...","type":"observation","observation":{"ok":true,"logs":["read 84 lines"],"value":"undefined","error":null,"finalAnswer":null,"step":{"name":"read the loader","description":"see how it fetches"}}}
-{"seq":6,"at":"...","type":"message","message":{"role":"user","text":"<observation>..."},"origin":"observation"}
-{"seq":7,"at":"...","type":"note","text":"Stopped: reached the limit of 24 steps."}
-{"seq":8,"at":"...","type":"turn.end","status":"finished"}
+{"seq":2,"at":"...","type":"queue","entries":[{"origin":"human","text":"add a cache to the loader"}]}
+{"seq":3,"at":"...","type":"message","message":{"role":"assistant","text":"await step(...)","thinking":[{"text":"...","signature":"sig"}]},"origin":"assistant","usage":{"input":5120,"output":140,"cached":4800},"stopReason":"end_turn"}
+{"seq":4,"at":"...","type":"step","name":"read the loader","description":"see how it fetches"}
+{"seq":5,"at":"...","type":"tool","tool":"read src/loader.ts","intent":"see how it fetches","detail":"84 lines"}
+{"seq":6,"at":"...","type":"say","text":"The loader has no cache yet."}
+{"seq":7,"at":"...","type":"turn.end","status":"finished"}
 ```
+
+A second round, where the agent deposited what it found and the human said
+something else:
+
+```jsonl
+{"seq":8,"at":"...","type":"turn.start"}
+{"seq":9,"at":"...","type":"queue","entries":[{"origin":"model","text":"The loader fetches on every call."}]}
+{"seq":10,"at":"...","type":"queue","entries":[{"origin":"human","text":"now add the cache"}]}
+```
+
+Note what a deposit is not: it is not a `message`. The model's own words
+never enter the conversation as an assistant turn - they enter as queue
+entries, labelled `[you]`, and the model reads them back as a conclusion it
+reached rather than as something it wrote. Only the program it wrote is an
+assistant turn.
 
 ## 3. Writing
 
@@ -216,7 +234,11 @@ Rules:
 4. Unknown `type` values are ignored and counted the same way. Unknown fields
    are ignored. This is what lets a newer writer's file be opened by an older
    reader without losing the parts the reader understands.
-5. Sequences are not checked for gaps. `seq` is there for a reader that wants
+5. One exception to 4: the v1 `observation` event type is **read and
+   dropped**, and is not counted as damage. The transcript it belonged to is
+   gone, but the line was written by a replagent, and a replagent file with
+   one dropped line is not a damaged file.
+6. Sequences are not checked for gaps. `seq` is there for a reader that wants
    to notice one; refusing to open a file because of it would trade a whole
    session for a diagnostic.
 
@@ -229,14 +251,25 @@ export function restoreConversation(
 ): Conversation {
   const conversation = new Conversation();
   for (const event of events) {
-    if (event.type !== 'message') continue;
-    // A signature is the issuing provider's proof, not a portable credential.
-    const thinking = replayThinking ? event.message.thinking : undefined;
-    conversation.append(event.message.role, event.message.text, thinking);
+    if (event.type === 'message') {
+      const thinking = replayThinking ? event.message.thinking : undefined;
+      conversation.append(event.message.role, event.message.text, thinking);
+      continue;
+    }
+    if (event.type === 'queue') {
+      conversation.append('user', formatQueue(event.entries));
+    }
   }
   return conversation;
 }
 ```
+
+The two kinds of event are read side by side, because the two kinds of file
+are read the same way: a v2 file keeps what went into the request in its
+queue events and the model's replies in message events, and a v1 file keeps
+both as messages. A v1 file therefore replays with the queue branch never
+taken, and a v2 file replays with the message branch carrying only the
+assistant turns.
 
 `replayThinking` is the caller's decision - `resumed.header.model === options.model`
 in the CLI - because only the caller knows which model the next request is
@@ -250,21 +283,22 @@ Two resume rules matter:
   them to a different endpoint is not.
 - **An interrupted turn.** A `turn.start` with no matching `turn.end` means
   the process died mid-turn. The messages already appended stay in context -
-  they were really sent, and the code may have really run - and resume
+  they were really sent, and the program may have really run - and resume
   appends a note saying so, then logs it like any other message:
 
   ```
-  <observation>
-  The previous session ended while this turn was running. Its effects are
-  unknown; check the world model before repeating it.
-  </observation>
+  <queue>
+  [error] The previous session ended while this turn was running. Its effects are unknown; check before repeating it.
+  </queue>
   ```
 
-  It is written with `origin: "resume"`, so the replay draws it as a status
-  line rather than as something the human typed. `isInterrupted` scans back
-  from the end and answers `false` once it finds a `turn.end` or one of those
-  notes, so a resume that crashed before running a turn does not add the note
-  twice.
+  It wears the queue's clothes on purpose. The model reads everything as a
+  labelled block, so the note is read as the runtime talking - never as the
+  human, and never as its own earlier conclusion. It is written with
+  `origin: "resume"`, so the replay draws it as a status line rather than as
+  something the human typed. `isInterrupted` scans back from the end and
+  answers `false` once it finds a `turn.end` or one of those notes, so a
+  resume that crashed before running a turn does not add the note twice.
 
   The alternative - pretending the turn never happened - invites the model
   to run the same side effects twice. The note is written to the file because
@@ -280,9 +314,9 @@ reason to miss. What matters is whether the first request after resume is
 byte-identical to the prefix the server already holds.
 
 The design makes that the normal case:
-- `message` events store the exact strings given to `Conversation.append`,
-  including the formatted observation, so replay reproduces the turns
-  byte for byte.
+- `queue` and `message` events store the exact values given to
+  `Conversation.append`, including the labelled block the model read, so
+  replay reproduces the turns byte for byte.
 - Thinking blocks are stored with their signatures and replayed in place,
   so assistant turns are identical too.
 - The system prompt is unchanged as long as the app is; the header's
@@ -330,6 +364,10 @@ ordered by activity rather than by start time. A session with a `title`
 event shows the title instead of the first line. Prefix matching is allowed
 for `--resume 20261023`, and ambiguity is an error rather than a guess.
 
+The first line the human said is found in the queue events of a v2 file and
+in the human messages of a v1 file, because both kinds of file can still be
+opened and listed.
+
 ## 6. Privacy and retention
 
 - Sessions are `0600` in a `0700` directory. On Windows the mode is a no-op;
@@ -337,8 +375,8 @@ for `--resume 20261023`, and ambiguity is an error rather than a guess.
 - Credentials are never written. The API key and auth token live in the
   process environment and are not part of any event. The system prompt is
   not written either - only its hash.
-- Everything a step prints _is_ written, including whatever it read. That is
-  the point of a session and also the risk; the README says so, and
+- Everything a step reads _is_ written, including whatever a tool returned.
+  That is the point of a session and also the risk; the README says so, and
   `--no-session` turns recording off for shared or CI machines.
 - No automatic deletion or rotation. A session is a record; expiring records
   silently is how people lose work. Deleting one is a manual act - the files
@@ -367,10 +405,13 @@ src/
 ├── domain/
 │   ├── ports/session.ts        SessionEvent, SessionWriter, SessionStore,
 │   │                           SessionSummary, LoadedSession
-│   └── session.ts              restoreConversation, summarise, isInterrupted
-├── adapters/session/
-│   └── jsonl-sessions.ts       JsonlSessionStore (create/open/list),
-│                               JsonlSessionWriter (append/checkpoint/close)
+│   ├── queue.ts                MessageQueue, QueueEntry, formatQueue
+│   ├── session.ts              restoreConversation, summarise, isInterrupted
+│   └── unit.ts                 the scanner that finds the step in a reply
+├── adapters/
+│   ├── session/jsonl-sessions.ts  JsonlSessionStore (create/open/list),
+│   │                              JsonlSessionWriter (append/checkpoint/close)
+│   └── toolkit/                read, ls, glob, edit, bash
 ├── app/
 │   ├── replay-session.ts       events → UI events, for the transcript
 │   └── agent.ts                one `remember(...)` helper beside the
@@ -415,9 +456,22 @@ function remember(
 }
 ```
 
+The queue has its own line, and it is the same line the conversation gets:
+
+```ts
+function sendQueue(
+  deps: AgentDeps,
+  conversation: Conversation,
+  entries: readonly QueueEntry[],
+): void {
+  deps.session?.append({ type: 'queue', entries });
+  conversation.append('user', formatQueue(entries));
+}
+```
+
 The rest of the loop records what has no message form: `step` when the step
-names itself, `observation` after the REPL returns, `note` for every status
-line, `turn.*` around the loop.
+names itself, `tool` for each call it made, `say` for what it said, `note`
+for every status line, `turn.*` around the loop.
 
 ## 9. CLI
 
@@ -447,12 +501,17 @@ The log is the contract, so the tests are about degradation and equality:
 - **Round trip.** Write a turn through the store, open it again, and assert
   the events, the header, the summary and the reasoning blocks come back
   unchanged - signatures included.
+- **The queue survives.** The human's words, the model's deposits and the
+  errors round-trip with their origins, labels and all.
 - **Rebuild.** `restoreConversation` reproduces the live `Conversation`,
   including the merge of consecutive same-role turns.
 - **Torn tail.** A half-written last line is dropped; every complete event
   loads, `ignoredLines` stays zero, and the file is not rewritten.
 - **Unknown event / unreadable line.** Each is skipped and counted, and the
   rest of the session still loads.
+- **An older file.** A v1 header with a world and an `observation` line
+  still opens: the events load, the observation is dropped without counting
+  as damage, and a v1 header without a world is refused.
 - **Model mismatch.** `restoreConversation(events, false)` keeps the turns
   and drops the thinking.
 - **Interrupted turn.** `isInterrupted` is true after a bare `turn.start`,
@@ -474,10 +533,12 @@ The log is the contract, so the tests are about degradation and equality:
 | One file per what?    | session                              | resume, share, delete are all per session                  |
 | Format                | JSONL, append-only                   | crash-tolerant, greppable, no rewrite                      |
 | Unit of persistence   | completed messages + semantic events | deltas are rendering, not history                          |
-| Rebuild context from  | `message` events only                | equals what the model saw; display cannot drift the prompt |
+| Rebuild context from  | `queue` and `message` events         | equals what the model saw; display cannot drift the prompt |
+| The queue in the log  | the entries, not the rendering       | the rendering is derived; the entries are the truth        |
 | Thinking blocks       | stored whole with signature          | the provider rejects altered or unsigned thoughts          |
 | Other model on resume | strip thinking from the request      | a signature is one endpoint's proof                        |
 | Interrupted turn      | keep messages, add a resume note     | side effects may have happened; silence invites repeats    |
+| Old files             | read v1, drop its observations       | a file is not damaged because it is old                    |
 | Compaction            | none yet; `snapshot` reserved        | 10-40 MB files replay fast; second truth is a liability    |
 | Deletion              | manual only                          | a record that expires silently is not a record             |
 
@@ -487,9 +548,11 @@ The log is the contract, so the tests are about degradation and equality:
    that session's last turn never ended, resuming is still the right default;
    the CLI now says so before the first input, but a `/sessions` picker with
    the same warning is still missing.
-2. **World drift.** A resumed session may find `.replagent/world.json`
-   changed since it was written. The header records the path, not a hash;
-   adding `worldHash` later would let the agent be told its beliefs moved.
+2. **The queue in the listing.** A session's summary shows the first thing
+   the human said. What the model concluded, and how many rounds it took to
+   conclude it, are in the file but not in the list - a `--list-sessions` line
+   that said "7 rounds, 3 tools" would help a human pick which of twenty
+   files to open.
 3. **`/sessions` in the TUI.** Listing and switching sessions without leaving
    the app is a natural follow-up, but it needs a UI contract (`/resume`
    input handling, clearing the transcript) that is out of scope here.
@@ -501,4 +564,4 @@ The log is the contract, so the tests are about degradation and equality:
 2. `feat(cli): --resume, --continue, --list-sessions` - argument parsing,
    startup wiring, status bar id, lock.
 3. `feat(session): the transcript repaints itself` - record and replay
-   `step`/`observation`/`note`, interrupted-turn note, model-mismatch rule.
+   `step`/`tool`/`say`/`note`, interrupted-turn note, model-mismatch rule.

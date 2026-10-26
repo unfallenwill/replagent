@@ -1,11 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  DEFAULT_BASE_URL,
-  DEFAULT_EFFORT,
-  DEFAULT_MODEL,
-  DEFAULT_WORLD_PATH,
-  parseArgs,
-} from '../src/cli/args.js';
+import { DEFAULT_BASE_URL, DEFAULT_EFFORT, DEFAULT_MODEL, parseArgs } from '../src/cli/args.js';
 
 describe('parseArgs', () => {
   it('uses the defaults', () => {
@@ -16,7 +10,6 @@ describe('parseArgs', () => {
     expect(options.maxSteps).toBe(24);
     expect(options.effort).toBe(DEFAULT_EFFORT);
     expect(options.contextWindow).toBeUndefined();
-    expect(options.world).toBe(DEFAULT_WORLD_PATH);
   });
 
   it('reads the thinking effort', () => {
@@ -54,12 +47,6 @@ describe('parseArgs', () => {
     const options = parseArgs(['--context-window', '1000000'], {});
 
     expect(options.contextWindow).toBe(1_000_000);
-  });
-
-  it('reads where to keep the world model', () => {
-    const options = parseArgs(['--world', 'notes/model.json'], {});
-
-    expect(options.world).toBe('notes/model.json');
   });
 
   it('reads the model and base url from the environment', () => {

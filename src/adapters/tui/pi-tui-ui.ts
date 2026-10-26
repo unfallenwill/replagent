@@ -20,7 +20,7 @@ import {
 import type { CodeFormatter, CodeHighlighter } from '../../domain/ports/format.js';
 import type { LlmUsage } from '../../domain/ports/llm.js';
 import type { UiEvent, UiPort } from '../../domain/ports/ui.js';
-import { bold, cyan, dim, green, red, yellow } from '../format/ansi.js';
+import { bold, cyan, dim, red, yellow } from '../format/ansi.js';
 import { elidePath, type Location, readLocation } from '../workspace/location.js';
 
 const selectListTheme: SelectListTheme = {
@@ -461,18 +461,20 @@ export class PiTuiUi implements UiPort {
       case 'user-message':
         this.#document.addChild(new Text(`\n${bold(cyan('you'))} ${event.text}`));
         return;
-      case 'repl-log':
-        this.#addToStep(new Text(`${dim('  log')} ${event.text}`));
+      case 'tool':
+        // A tool belongs to the unit that called it: the reason for the
+        // call is the part worth keeping, and the outcome is the receipt.
+        this.#addToStep(
+          new Text(`${dim(`  ${event.tool}`)} ${event.intent} ${dim(`· ${event.detail}`)}`),
+        );
         return;
-      case 'repl-value':
-        this.#addToStep(new Text(`${dim('  =>  ')} ${green(event.text)}`));
+      case 'say':
+        // What the agent said to the human, in the agent's own voice.
+        this.#document.addChild(new Text(`\n${bold(cyan('agent'))} ${event.text}`));
         return;
       case 'repl-error':
         this.#addToStep(new Text(`${red('  error')} ${event.text}`));
         this.#markFailed();
-        return;
-      case 'final':
-        this.#document.addChild(new Text(`\n${event.text}`));
         return;
       case 'status':
         // A note is a receipt: it happened, and it stays in the transcript
@@ -487,10 +489,10 @@ export class PiTuiUi implements UiPort {
   }
 
   /**
-   * Put what the step produced inside the step.
+   * Put what the unit produced inside the unit.
    *
-   * The logs, the value and the error belong to the step that produced
-   * them, so they open and close with it.
+   * The tools it used, what it said and the error it hit belong to the unit
+   * that produced them, so they open and close with it.
    */
   #addToStep(text: Text): void {
     const block = this.#block;

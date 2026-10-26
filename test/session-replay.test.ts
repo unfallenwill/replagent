@@ -30,14 +30,7 @@ function event(input: SessionEventInput): SessionEvent {
   return { ...input, seq, at: '2026-10-23T19:10:00.000Z' };
 }
 
-const observation = {
-  ok: true,
-  logs: ['three files'],
-  value: 'undefined',
-  error: undefined,
-  finalAnswer: undefined,
-  step: { name: 'read the repo', description: 'see what is there' },
-};
+const CODE = 'await step("read the repo", "see what is there", async () => {});';
 
 describe('replaySession', () => {
   it('puts the turn back on the screen in the order it happened', () => {
@@ -46,26 +39,19 @@ describe('replaySession', () => {
     replaySession(
       [
         event({ type: 'turn.start' }),
-        event({
-          type: 'message',
-          origin: 'human',
-          message: { role: 'user', text: 'what is here?' },
-        }),
+        event({ type: 'queue', entries: [{ origin: 'human', text: 'what is here?' }] }),
         event({
           type: 'message',
           origin: 'assistant',
           message: {
             role: 'assistant',
-            text: 'await step("read the repo", "see what is there", async () => {});',
+            text: CODE,
             thinking: [{ text: 'look first', signature: 'sig' }],
           },
         }),
-        event({ type: 'observation', observation }),
-        event({
-          type: 'message',
-          origin: 'observation',
-          message: { role: 'user', text: '<observation>\nthree files\n</observation>' },
-        }),
+        event({ type: 'step', name: 'read the repo', description: 'see what is there' }),
+        event({ type: 'tool', tool: 'read', intent: 'see it', detail: 'README.md' }),
+        event({ type: 'say', text: 'three files' }),
         event({ type: 'turn.end', status: 'finished' }),
       ],
       ui,
@@ -74,32 +60,34 @@ describe('replaySession', () => {
     expect(ui.events).toEqual([
       { type: 'user-message', text: 'what is here?' },
       { type: 'agent-thinking', text: 'look first' },
-      {
-        type: 'agent-code',
-        text: 'await step("read the repo", "see what is there", async () => {});',
-      },
+      { type: 'agent-code', text: CODE },
       { type: 'step', name: 'read the repo', description: 'see what is there' },
+      { type: 'tool', tool: 'read', intent: 'see it', detail: 'README.md' },
+      { type: 'say', text: 'three files' },
       { type: 'exec-done' },
-      { type: 'repl-log', text: 'three files' },
-      { type: 'repl-value', text: 'undefined' },
     ]);
   });
 
-  it('does not mistake the observation the model read for the human speaking', () => {
+  it('does not mistake what the model deposited for the human speaking', () => {
     const ui = new RecordingUi();
 
     replaySession(
-      [
-        event({
-          type: 'message',
-          origin: 'observation',
-          message: { role: 'user', text: '<observation>\n1\n</observation>' },
-        }),
-      ],
+      [event({ type: 'queue', entries: [{ origin: 'model', text: 'there are three' }] })],
       ui,
     );
 
     expect(ui.events).toEqual([]);
+  });
+
+  it('shows the error the runtime put in the queue', () => {
+    const ui = new RecordingUi();
+
+    replaySession(
+      [event({ type: 'queue', entries: [{ origin: 'error', text: 'ENOENT: no such file' }] })],
+      ui,
+    );
+
+    expect(ui.events).toEqual([{ type: 'repl-error', text: 'ENOENT: no such file' }]);
   });
 
   it('says when the session had been resumed', () => {
@@ -110,7 +98,7 @@ describe('replaySession', () => {
         event({
           type: 'message',
           origin: 'resume',
-          message: { role: 'user', text: '<observation>interrupted</observation>' },
+          message: { role: 'user', text: 'the previous turn was interrupted' },
         }),
       ],
       ui,
@@ -120,41 +108,59 @@ describe('replaySession', () => {
     expect(ui.events[0]?.type).toBe('status');
   });
 
-  it('replays notes and the final answer', () => {
+  it('replays notes and what the agent said', () => {
     const ui = new RecordingUi();
 
     replaySession(
       [
-        event({ type: 'note', text: 'The reply was cut off (max_tokens reached).' }),
-        event({
-          type: 'observation',
-          observation: { ...observation, finalAnswer: 'done' },
-        }),
+        event({ type: 'note', text: 'Stopped: reached the limit of 24 steps.' }),
+        event({ type: 'say', text: 'there are three files' }),
       ],
       ui,
     );
 
     expect(ui.events).toContainEqual({
       type: 'status',
-      text: 'The reply was cut off (max_tokens reached).',
+      text: 'Stopped: reached the limit of 24 steps.',
     });
-    expect(ui.events).toContainEqual({ type: 'final', text: 'done' });
+    expect(ui.events).toContainEqual({ type: 'say', text: 'there are three files' });
   });
 
-  it('survives an observation with holes in it', () => {
+  it('closes one reply before the next one opens', () => {
     const ui = new RecordingUi();
 
     replaySession(
       [
         event({
-          type: 'observation',
-          observation: { ok: false } as unknown as typeof observation,
+          type: 'message',
+          origin: 'assistant',
+          message: { role: 'assistant', text: 'first' },
+        }),
+        event({
+          type: 'message',
+          origin: 'assistant',
+          message: { role: 'assistant', text: 'second' },
         }),
       ],
       ui,
     );
 
-    // A damaged display event costs a fold, not the session.
-    expect(ui.events).toContainEqual({ type: 'exec-done' });
+    expect(ui.events).toEqual([
+      { type: 'agent-code', text: 'first' },
+      { type: 'exec-done' },
+      { type: 'agent-code', text: 'second' },
+      { type: 'exec-done' },
+    ]);
+  });
+
+  it('draws nothing for a turn that never said anything', () => {
+    const ui = new RecordingUi();
+
+    replaySession(
+      [event({ type: 'turn.start' }), event({ type: 'turn.end', status: 'finished' })],
+      ui,
+    );
+
+    expect(ui.events).toEqual([]);
   });
 });

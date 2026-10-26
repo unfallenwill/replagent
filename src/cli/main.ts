@@ -7,17 +7,21 @@ import { JsHighlighter } from '../adapters/format/js-highlight.js';
 import { NodeReplSession } from '../adapters/repl/node-repl.js';
 import { JsonlSessionStore, replagentHome } from '../adapters/session/jsonl-sessions.js';
 import { PiTuiUi } from '../adapters/tui/pi-tui-ui.js';
-import { FileWorld } from '../adapters/world/file-world.js';
 import { runAgentTurn } from '../app/agent.js';
 import { SYSTEM_PROMPT } from '../app/prompt.js';
 import { replaySession } from '../app/replay-session.js';
 import { Conversation } from '../domain/conversation.js';
-import type { LoadedSession, SessionSummary, SessionWriter } from '../domain/ports/session.js';
+import type {
+  LoadedSession,
+  SessionSummary,
+  SessionTurnStatus,
+  SessionWriter,
+} from '../domain/ports/session.js';
 import type { UiPort } from '../domain/ports/ui.js';
+import { MessageQueue } from '../domain/queue.js';
 import { INTERRUPTED_NOTE, isInterrupted, restoreConversation } from '../domain/session.js';
 import { type CliOptions, HELP, parseArgs } from './args.js';
 import { contextWindowFor } from './context-window.js';
-import { TurnQueue } from './turn-queue.js';
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
@@ -59,38 +63,74 @@ async function main(): Promise<void> {
     model: options.model,
     effort: options.effort,
   });
-  const repl = new NodeReplSession({ world: new FileWorld(options.world) });
+  const repl = new NodeReplSession({ cwd: process.cwd() });
 
-  const queue = new TurnQueue(
-    async (text: string) => {
-      const controller = new AbortController();
-      currentController = controller;
-      try {
-        await runAgentTurn(
-          {
-            llm,
-            repl,
-            ui,
-            systemPrompt: SYSTEM_PROMPT,
-            maxTokens: options.maxTokens,
-            maxSteps: options.maxSteps,
-            ...(session.writer !== undefined ? { session: session.writer } : {}),
-          },
-          session.conversation,
-          text,
-          controller.signal,
-        );
-      } finally {
-        currentController = undefined;
+  // The one channel: the human's words, the model's deposits and the errors
+  // of a failed unit all wait in here, and each round drains it.
+  const queue = new MessageQueue();
+  let running = false;
+
+  /**
+   * One turn, and whether it was the end of the evening.
+   *
+   * A turn that was cancelled, that ran out of steps or that could not be
+   * read would do the same thing again, so it ends the run: the human takes
+   * over from there.
+   */
+  const runOneTurn = async (): Promise<boolean> => {
+    const controller = new AbortController();
+    currentController = controller;
+    try {
+      const result = await runAgentTurn(
+        {
+          llm,
+          repl,
+          ui,
+          queue,
+          systemPrompt: SYSTEM_PROMPT,
+          maxTokens: options.maxTokens,
+          maxSteps: options.maxSteps,
+          ...(session.writer !== undefined ? { session: session.writer } : {}),
+        },
+        session.conversation,
+        controller.signal,
+      );
+      return endsTheEvening(result.status);
+    } catch (error) {
+      ui.emit({
+        type: 'repl-error',
+        text: error instanceof Error ? error.message : String(error),
+      });
+      return true;
+    } finally {
+      currentController = undefined;
+    }
+  };
+
+  const runRounds = async (): Promise<void> => {
+    if (running) {
+      // A round is already going; the queue is where the new words wait.
+      return;
+    }
+    running = true;
+    try {
+      // While the queue has something in it, there is a round to run. The
+      // agent's own deposit can be what is in it: a unit that said its
+      // piece and then put something else in the queue is asking for the
+      // next round to happen.
+      while (!queue.empty) {
+        if (await runOneTurn()) {
+          break;
+        }
       }
-    },
-    (error: unknown) => {
-      ui.emit({ type: 'repl-error', text: error instanceof Error ? error.message : String(error) });
-    },
-  );
+    } finally {
+      running = false;
+    }
+  };
 
   ui.onInput((text: string) => {
-    queue.push(text);
+    queue.push('human', text);
+    void runRounds();
   });
 
   process.on('SIGINT', () => {
@@ -106,6 +146,17 @@ async function main(): Promise<void> {
     repl.close();
     session.writer?.close();
   }
+}
+
+/**
+ * Whether a round that ended this way is the end of the evening.
+ *
+ * A cancelled round was cut short by the human, and a round that ran out of
+ * steps or could not be read would run out again. Starting another round
+ * after one of those is a loop with nothing at the end of it.
+ */
+function endsTheEvening(status: SessionTurnStatus): boolean {
+  return status === 'cancelled' || status === 'limit' || status === 'rejected';
 }
 
 /** The session store, unless the run is not supposed to be recorded. */
@@ -171,7 +222,6 @@ function startSession(
       effort: options.effort,
       maxTokens: options.maxTokens,
       maxSteps: options.maxSteps,
-      world: options.world,
       systemPromptHash: promptHash,
       agent: 'replagent',
     }),

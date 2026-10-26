@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { type AgentDeps, runAgentTurn } from '../src/app/agent.js';
+import { type AgentDeps, type AgentTurnResult, runAgentTurn } from '../src/app/agent.js';
 import { Conversation } from '../src/domain/conversation.js';
 import type { LlmPort, LlmRequest, LlmStreamEvent } from '../src/domain/ports/llm.js';
-import type { ReplObservation, ReplPort, ReplStep } from '../src/domain/ports/repl.js';
+import type { ReplEvent, ReplOutcome, ReplPort } from '../src/domain/ports/repl.js';
 import type { SessionEventInput, SessionWriter } from '../src/domain/ports/session.js';
 import type { UiEvent, UiPort } from '../src/domain/ports/ui.js';
+import { MessageQueue } from '../src/domain/queue.js';
 
 class ScriptedLlm implements LlmPort {
   readonly requests: LlmRequest[] = [];
@@ -17,7 +18,9 @@ class ScriptedLlm implements LlmPort {
   }
 
   async *stream(request: LlmRequest): AsyncIterable<LlmStreamEvent> {
-    this.requests.push(request);
+    // The request is a snapshot: the conversation keeps growing while the
+    // turn runs, and what the model was given is what it was given.
+    this.requests.push({ ...request, messages: [...request.messages] });
     const index = this.requests.length - 1;
     const thinking = this.#thinking[index] ?? '';
     if (thinking.length > 0) {
@@ -34,7 +37,7 @@ class ScriptedLlm implements LlmPort {
 
 class MeteredLlm implements LlmPort {
   async *stream(): AsyncIterable<LlmStreamEvent> {
-    yield { type: 'text', text: '1;' };
+    yield { type: 'text', text: 'await step("n", "d", async () => {});' };
     yield { type: 'done', stopReason: 'end_turn', usage: { input: 120, output: 9, cached: 100 } };
   }
 }
@@ -49,25 +52,69 @@ class FailingLlm implements LlmPort {
   }
 }
 
+/** What one unit did, as the REPL would report it. */
+interface ScriptedRun {
+  readonly events: readonly ReplEvent[];
+  readonly outcome: ReplOutcome;
+}
+
 class ScriptedRepl implements ReplPort {
   readonly executed: string[] = [];
-  readonly #observations: readonly ReplObservation[];
+  readonly #runs: readonly ScriptedRun[];
 
-  constructor(observations: readonly ReplObservation[]) {
-    this.#observations = observations;
+  constructor(runs: readonly ScriptedRun[] = []) {
+    this.#runs = runs;
   }
 
-  async exec(code: string, onStep?: (step: ReplStep) => void): Promise<ReplObservation> {
+  async exec(code: string, onEvent?: (event: ReplEvent) => void): Promise<ReplOutcome> {
     this.executed.push(code);
-    const next = this.#observations[this.executed.length - 1] ?? noopObservation;
-    // The real REPL reports the step while the body is still running; the
-    // fake reports it before returning, which is early enough for the
-    // ordering the UI cares about.
-    if (next.step !== undefined) {
-      onStep?.(next.step);
+    const next = this.#runs[this.executed.length - 1] ?? quietRun;
+    for (const event of next.events) {
+      onEvent?.(event);
     }
-    return next;
+    return next.outcome;
   }
+}
+
+/** A unit that did nothing in particular. */
+const quietRun: ScriptedRun = {
+  events: [],
+  outcome: { ok: true, error: undefined, step: undefined, said: false },
+};
+
+/**
+ * A unit that did these things and came back clean.
+ *
+ * Every unit names itself before its body runs, so the fake names it too -
+ * unless the test wants to say which name.
+ */
+function did(...events: readonly ReplEvent[]): ScriptedRun {
+  const step = events.find(
+    (event): event is Extract<ReplEvent, { kind: 'step' }> => event.kind === 'step',
+  );
+  const named = step ?? NAMED;
+  const all = step === undefined ? [NAMED, ...events] : events;
+  return {
+    events: all,
+    outcome: {
+      ok: true,
+      error: undefined,
+      step: { name: named.name, description: named.description },
+      said: all.some((event) => event.kind === 'say'),
+    },
+  };
+}
+
+/** The name a unit gives itself when the test does not care. */
+const NAMED: Extract<ReplEvent, { kind: 'step' }> = {
+  kind: 'step',
+  name: 'a step',
+  description: 'what it does',
+};
+
+/** A unit that threw. */
+function failed(error: string): ScriptedRun {
+  return { events: [], outcome: { ok: false, error, step: undefined, said: false } };
 }
 
 class RecordingSession implements SessionWriter {
@@ -107,87 +154,112 @@ class RecordingUi implements UiPort {
   }
 }
 
-function deps(llm: LlmPort, repl: ReplPort, ui: UiPort, maxSteps = 4): AgentDeps {
+function deps(
+  llm: LlmPort,
+  repl: ReplPort,
+  ui: UiPort,
+  maxSteps = 4,
+  queue: MessageQueue = new MessageQueue(),
+): AgentDeps {
   return {
     llm,
     repl,
     ui,
+    queue,
     systemPrompt: 'you speak javascript',
     maxTokens: 1024,
     maxSteps,
   };
 }
 
-const noopObservation: ReplObservation = {
-  ok: true,
-  logs: [],
-  value: undefined,
-  error: undefined,
-  finalAnswer: undefined,
-  step: undefined,
-};
+/** A queue with the human's words in it, the way the CLI leaves it. */
+function waiting(text: string): MessageQueue {
+  const queue = new MessageQueue();
+  queue.push('human', text);
+  return queue;
+}
+
+function signal(): AbortSignal {
+  return new AbortController().signal;
+}
+
+/** The text of the last message the model was sent. */
+function lastRequest(llm: ScriptedLlm): string {
+  return llm.requests.at(-1)?.messages.at(-1)?.text ?? '';
+}
 
 describe('runAgentTurn', () => {
-  it('executes the model output and feeds the observation back', async () => {
-    const llm = new ScriptedLlm(['const a = 1;', 'console.log(a);']);
+  it('runs the unit and hands the deposit back to the model', async () => {
+    const llm = new ScriptedLlm([
+      'await step("count", "count what is in src", async () => { deposit("42"); });',
+      'await step("answer", "tell the human", async () => { say("there are 42"); });',
+    ]);
     const repl = new ScriptedRepl([
-      { ...noopObservation, value: 'undefined' },
-      { ...noopObservation, logs: ['1'], value: 'undefined' },
+      did({ kind: 'deposit', text: '42' }),
+      did(
+        { kind: 'step', name: 'answer', description: 'tell the human' },
+        { kind: 'say', text: 'there are 42' },
+      ),
     ]);
     const ui = new RecordingUi();
     const conversation = new Conversation();
 
     const result = await runAgentTurn(
-      deps(llm, repl, ui, 2),
+      deps(llm, repl, ui, 4, waiting('how many modules?')),
       conversation,
-      'what is one?',
-      new AbortController().signal,
+      signal(),
     );
 
-    expect(repl.executed).toEqual(['const a = 1;', 'console.log(a);']);
-    expect(result.finished).toBe(false);
-    expect(conversation.messages.map((message) => message.role)).toEqual([
-      'user',
-      'assistant',
-      'user',
-      'assistant',
-      'user',
-    ]);
-    expect(conversation.messages[2]?.text).toBe('<observation>\n=> undefined\n</observation>');
+    expect(repl.executed).toHaveLength(2);
+    expect(result.finished).toBe(true);
+    // The deposit went into the queue, and the next request carried it -
+    // labelled, so the model can tell its own conclusion from the human.
+    expect(lastRequest(llm)).toBe('<queue>\n[you] 42\n</queue>');
   });
 
-  it('stops when the agent calls finish()', async () => {
-    const llm = new ScriptedLlm(['finish("the answer")']);
-    const repl = new ScriptedRepl([
-      { ...noopObservation, value: 'the answer', finalAnswer: 'the answer' },
-    ]);
+  it('gives the human the words he typed, labelled as his', async () => {
+    const llm = new ScriptedLlm(['await step("n", "d", async () => { say("hi"); });']);
+    const repl = new ScriptedRepl([did({ kind: 'say', text: 'hi' })]);
+
+    await runAgentTurn(
+      deps(llm, repl, new RecordingUi(), 1, waiting('say hi')),
+      new Conversation(),
+      signal(),
+    );
+
+    expect(llm.requests[0]?.messages.at(-1)?.text).toBe('<queue>\n[human] say hi\n</queue>');
+  });
+
+  it('ends the round when the agent says something', async () => {
+    const llm = new ScriptedLlm(['await step("n", "d", async () => { say("the answer"); });']);
+    const repl = new ScriptedRepl([did({ kind: 'say', text: 'the answer' })]);
     const ui = new RecordingUi();
 
     const result = await runAgentTurn(
-      deps(llm, repl, ui),
+      deps(llm, repl, ui, 4, waiting('say something')),
       new Conversation(),
-      'say something',
-      new AbortController().signal,
+      signal(),
     );
 
     expect(result.finished).toBe(true);
     expect(result.steps).toBe(1);
-    expect(ui.events).toContainEqual({ type: 'final', text: 'the answer' });
+    expect(ui.events).toContainEqual({ type: 'say', text: 'the answer' });
   });
 
   it('shows the agent the step it ran', async () => {
-    const llm = new ScriptedLlm(['const a = 1;']);
+    const llm = new ScriptedLlm(['await step("n", "d", async () => { say("done"); });']);
     const repl = new ScriptedRepl([
-      { ...noopObservation, value: '1', step: { name: 'add one', description: 'count up' } },
+      did(
+        { kind: 'step', name: 'add one', description: 'count up' },
+        { kind: 'say', text: 'done' },
+      ),
     ]);
     const ui = new RecordingUi();
-    const conversation = new Conversation();
 
     await runAgentTurn(
-      deps(llm, repl, ui),
-      conversation,
-      'what is one?',
-      new AbortController().signal,
+      deps(llm, repl, ui, 1, waiting('what is one?')),
+      new Conversation(),
+      signal(),
     );
 
     expect(ui.events).toContainEqual({
@@ -201,52 +273,123 @@ describe('runAgentTurn', () => {
     expect(kinds.indexOf('step')).toBeLessThan(kinds.indexOf('exec-done'));
   });
 
+  it('shows the tool the agent used, and why', async () => {
+    const llm = new ScriptedLlm(['await step("n", "d", async () => { say("done"); });']);
+    const repl = new ScriptedRepl([
+      did(
+        { kind: 'tool', tool: 'read', intent: 'see the layout', detail: 'src/app/agent.ts' },
+        { kind: 'say', text: 'done' },
+      ),
+    ]);
+    const ui = new RecordingUi();
+
+    await runAgentTurn(deps(llm, repl, ui, 1, waiting('look')), new Conversation(), signal());
+
+    expect(ui.events).toContainEqual({
+      type: 'tool',
+      tool: 'read',
+      intent: 'see the layout',
+      detail: 'src/app/agent.ts',
+    });
+  });
+
   it('gives up after the step limit', async () => {
-    const llm = new ScriptedLlm(['1', '2', '3', '4', '5']);
-    const repl = new ScriptedRepl([]);
+    const llm = new ScriptedLlm([
+      'await step("a", "a", async () => { deposit("a"); });',
+      'await step("b", "b", async () => { deposit("b"); });',
+      'await step("c", "c", async () => { deposit("c"); });',
+      'await step("d", "d", async () => { deposit("d"); });',
+      'await step("e", "e", async () => { deposit("e"); });',
+    ]);
+    const repl = new ScriptedRepl([
+      did({ kind: 'deposit', text: 'a' }),
+      did({ kind: 'deposit', text: 'b' }),
+      did({ kind: 'deposit', text: 'c' }),
+      did({ kind: 'deposit', text: 'd' }),
+    ]);
     const ui = new RecordingUi();
 
     const result = await runAgentTurn(
-      deps(llm, repl, ui),
+      deps(llm, repl, ui, 4, waiting('loop')),
       new Conversation(),
-      'loop',
-      new AbortController().signal,
+      signal(),
     );
 
     expect(result.finished).toBe(false);
     expect(result.steps).toBe(4);
+    expect(result.status).toBe('limit');
     expect(ui.events).toContainEqual({
       type: 'status',
       text: 'Stopped: reached the limit of 4 steps.',
     });
   });
 
-  it('reports the observation to the user', async () => {
-    const llm = new ScriptedLlm(['console.log("hi")']);
-    const repl = new ScriptedRepl([{ ...noopObservation, logs: ['hi'] }]);
+  it('hands a unit that threw back to the model', async () => {
+    const llm = new ScriptedLlm([
+      'await step("boom", "break on purpose", async () => { throw new Error("it broke"); });',
+      'await step("again", "try again", async () => { say("never mind"); });',
+    ]);
+    const repl = new ScriptedRepl([
+      failed('Error: it broke'),
+      did({ kind: 'say', text: 'never mind' }),
+    ]);
     const ui = new RecordingUi();
 
-    await runAgentTurn(
-      deps(llm, repl, ui),
-      new Conversation(),
-      'say hi',
-      new AbortController().signal,
+    await runAgentTurn(deps(llm, repl, ui, 4, waiting('break it')), new Conversation(), signal());
+
+    // The failure is always seen by the model: it is in the queue, labelled
+    // as an error rather than as something the human said.
+    expect(lastRequest(llm)).toContain('[error] Error: it broke');
+    expect(ui.events).toContainEqual({ type: 'repl-error', text: 'Error: it broke' });
+  });
+
+  it('teaches the model when its reply is not a unit, and charges it for it', async () => {
+    const llm = new ScriptedLlm([
+      'const a = 1;',
+      'await step("n", "d", async () => { say("now it is a unit"); });',
+    ]);
+    const repl = new ScriptedRepl([did({ kind: 'say', text: 'now it is a unit' })]);
+    const conversation = new Conversation();
+
+    const result = await runAgentTurn(
+      deps(llm, repl, new RecordingUi(), 4, waiting('do it')),
+      conversation,
+      signal(),
     );
 
-    expect(ui.events).toContainEqual({ type: 'repl-log', text: 'hi' });
-    expect(ui.events).toContainEqual({ type: 'agent-code', text: 'console.log("hi")' });
+    expect(lastRequest(llm)).toContain('[error] Your reply was not a unit');
+    // A reply in the wrong shape is a wrong answer, and it costs a step.
+    expect(result.steps).toBe(2);
+  });
+
+  it('teaches the model when its reply is not javascript', async () => {
+    const llm = new ScriptedLlm([
+      'Sure! Here is how you do it:',
+      'await step("n", "d", async () => { say("now it is code"); });',
+    ]);
+    const repl = new ScriptedRepl([did({ kind: 'say', text: 'now it is code' })]);
+
+    await runAgentTurn(
+      deps(llm, repl, new RecordingUi(), 2, waiting('do it')),
+      new Conversation(),
+      signal(),
+    );
+
+    expect(lastRequest(llm)).toContain('was not valid JavaScript');
   });
 
   it('emits a code event for a rejected turn as well', async () => {
-    const llm = new ScriptedLlm(['<tool_call>{"name": "fetch"}</tool_call>', 'console.log("ok")']);
-    const repl = new ScriptedRepl([{ ...noopObservation }]);
+    const llm = new ScriptedLlm([
+      '<tool_call>{"name": "fetch"}</tool_call>',
+      'await step("n", "d", async () => { say("ok"); });',
+    ]);
+    const repl = new ScriptedRepl([did({ kind: 'say', text: 'ok' })]);
     const ui = new RecordingUi();
 
     await runAgentTurn(
-      deps(llm, repl, ui, 4),
+      deps(llm, repl, ui, 4, waiting('do something')),
       new Conversation(),
-      'do something',
-      new AbortController().signal,
+      signal(),
     );
 
     const codeTexts = ui.events.flatMap((event) =>
@@ -257,56 +400,57 @@ describe('runAgentTurn', () => {
     // closed and the next step writes below it.
     expect(codeTexts.length).toBeGreaterThanOrEqual(2);
     expect(codeTexts[0]).toContain('tool_call');
-    expect(codeTexts[1]).toBe('console.log("ok")');
     expect(ui.events.some((event) => event.type === 'repl-error')).toBe(true);
+  });
+
+  it('gives up on a model that keeps emitting tool calls', async () => {
+    const llm = new ScriptedLlm([
+      '<tool_call>{"name": "fetch"}</tool_call>',
+      '<tool_call>{"name": "fetch"}</tool_call>',
+      '<tool_call>{"name": "fetch"}</tool_call>',
+    ]);
+    const repl = new ScriptedRepl([]);
+
+    const result = await runAgentTurn(
+      deps(llm, repl, new RecordingUi(), 4, waiting('fetch it')),
+      new Conversation(),
+      signal(),
+    );
+
+    // A tool call is a transport artefact: it costs a round trip, not a
+    // step of the budget.
+    expect(result.steps).toBe(0);
+    expect(result.status).toBe('rejected');
   });
 
   it('unwraps a tool call and runs the payload', async () => {
     const llm = new ScriptedLlm([
-      '<tool_call>{"name": "repl", "input": {"code": "1 + 1"}}</tool_call>',
+      '<tool_call>{"name": "repl", "input": {"code": "await step(\\"n\\", \\"d\\", async () => {});"}}</tool_call>',
     ]);
-    const repl = new ScriptedRepl([{ ...noopObservation, value: '2' }]);
+    const repl = new ScriptedRepl([]);
     const ui = new RecordingUi();
 
-    await runAgentTurn(
-      deps(llm, repl, ui, 2),
-      new Conversation(),
-      'compute',
-      new AbortController().signal,
-    );
+    await runAgentTurn(deps(llm, repl, ui, 2, waiting('compute')), new Conversation(), signal());
 
-    expect(repl.executed).toEqual(['1 + 1']);
+    expect(repl.executed).toEqual(['await step("n", "d", async () => {});']);
     expect(ui.events).toContainEqual({
       type: 'status',
       text: 'Unwrapped a tool-call envelope from the model output.',
     });
   });
 
-  it('teaches the model when its reply is not javascript', async () => {
-    const llm = new ScriptedLlm(['Sure! Here is how you do it:']);
+  it('reports the turn budget as it is spent', async () => {
+    const llm = new ScriptedLlm([
+      'await step("a", "a", async () => { deposit("a"); });',
+      'await step("b", "b", async () => { deposit("b"); });',
+    ]);
     const repl = new ScriptedRepl([
-      { ...noopObservation, ok: false, error: "SyntaxError: Unexpected identifier 'Sure'" },
+      did({ kind: 'deposit', text: 'a' }),
+      did({ kind: 'deposit', text: 'b' }),
     ]);
     const ui = new RecordingUi();
-    const conversation = new Conversation();
 
-    await runAgentTurn(deps(llm, repl, ui, 2), conversation, 'do it', new AbortController().signal);
-
-    const observation = conversation.messages[2]?.text ?? '';
-    expect(observation).toContain('was not valid JavaScript');
-  });
-
-  it('reports the turn budget as it is spent', async () => {
-    const llm = new ScriptedLlm(['const a = 1;', 'const b = 2;']);
-    const repl = new ScriptedRepl([{ ...noopObservation }, { ...noopObservation }]);
-    const ui = new RecordingUi();
-
-    await runAgentTurn(
-      deps(llm, repl, ui, 2),
-      new Conversation(),
-      'loop',
-      new AbortController().signal,
-    );
+    await runAgentTurn(deps(llm, repl, ui, 2, waiting('loop')), new Conversation(), signal());
 
     // The counter exists before the first step does, and rises with each
     // one: that is what the bar has to show.
@@ -321,17 +465,10 @@ describe('runAgentTurn', () => {
 
   it('relays what the model call cost', async () => {
     const llm = new MeteredLlm();
-    const repl = new ScriptedRepl([
-      { ...noopObservation, value: 'the answer', finalAnswer: 'the answer' },
-    ]);
+    const repl = new ScriptedRepl([]);
     const ui = new RecordingUi();
 
-    await runAgentTurn(
-      deps(llm, repl, ui),
-      new Conversation(),
-      'compute',
-      new AbortController().signal,
-    );
+    await runAgentTurn(deps(llm, repl, ui, 2, waiting('compute')), new Conversation(), signal());
 
     expect(ui.events).toContainEqual({
       type: 'turn-usage',
@@ -340,16 +477,14 @@ describe('runAgentTurn', () => {
   });
 
   it('reports the reasoning before the code, in the order it happened', async () => {
-    const llm = new ScriptedLlm(['finish("done")'], ['the answer is in the file']);
-    const repl = new ScriptedRepl([{ ...noopObservation, value: 'done', finalAnswer: 'done' }]);
+    const llm = new ScriptedLlm(
+      ['await step("n", "d", async () => { say("done"); });'],
+      ['the answer is in the file'],
+    );
+    const repl = new ScriptedRepl([did({ kind: 'say', text: 'done' })]);
     const ui = new RecordingUi();
 
-    await runAgentTurn(
-      deps(llm, repl, ui),
-      new Conversation(),
-      'do it',
-      new AbortController().signal,
-    );
+    await runAgentTurn(deps(llm, repl, ui, 1, waiting('do it')), new Conversation(), signal());
 
     const kinds = ui.events.map((event) => event.type);
     const thinking = kinds.indexOf('agent-thinking');
@@ -364,20 +499,22 @@ describe('runAgentTurn', () => {
   });
 
   it('keeps the reasoning with the assistant turn for the next request', async () => {
-    const llm = new ScriptedLlm(['const a = 1;'], ['one is the first number']);
-    const repl = new ScriptedRepl([{ ...noopObservation, value: 'undefined' }]);
+    const llm = new ScriptedLlm(
+      ['await step("n", "d", async () => { deposit("x"); });'],
+      ['one is the first number'],
+    );
+    const repl = new ScriptedRepl([did({ kind: 'deposit', text: 'x' })]);
     const conversation = new Conversation();
 
     await runAgentTurn(
-      deps(llm, repl, new RecordingUi(), 1),
+      deps(llm, repl, new RecordingUi(), 1, waiting('what is one?')),
       conversation,
-      'what is one?',
-      new AbortController().signal,
+      signal(),
     );
 
     expect(conversation.messages[1]).toEqual({
       role: 'assistant',
-      text: 'const a = 1;',
+      text: 'await step("n", "d", async () => { deposit("x"); });',
       thinking: [{ text: 'one is the first number', signature: 'sig-0' }],
     });
   });
@@ -390,10 +527,9 @@ describe('runAgentTurn', () => {
     const ui = new RecordingUi();
 
     await runAgentTurn(
-      deps(llm, new ScriptedRepl([]), ui, 1),
+      deps(llm, new ScriptedRepl([]), ui, 1, waiting('do it')),
       new Conversation(),
-      'do it',
-      new AbortController().signal,
+      signal(),
     );
 
     // The thought happened, even though what it produced is not runnable.
@@ -404,14 +540,13 @@ describe('runAgentTurn', () => {
   });
 
   it('reports no reasoning when the model did not think', async () => {
-    const llm = new ScriptedLlm(['finish("done")']);
+    const llm = new ScriptedLlm(['await step("n", "d", async () => { say("done"); });']);
     const ui = new RecordingUi();
 
     await runAgentTurn(
-      deps(llm, new ScriptedRepl([{ ...noopObservation, finalAnswer: 'done' }]), ui),
+      deps(llm, new ScriptedRepl([did({ kind: 'say', text: 'done' })]), ui, 1, waiting('do it')),
       new Conversation(),
-      'do it',
-      new AbortController().signal,
+      signal(),
     );
 
     expect(ui.events.some((event) => event.type === 'agent-thinking')).toBe(false);
@@ -419,64 +554,51 @@ describe('runAgentTurn', () => {
   });
 
   it('reports the end of the execution even when there is nothing to report', async () => {
-    const llm = new ScriptedLlm(['1;']);
-    const repl = new ScriptedRepl([{ ...noopObservation }]);
+    const llm = new ScriptedLlm(['await step("n", "d", async () => { deposit("x"); });']);
+    const repl = new ScriptedRepl([did({ kind: 'deposit', text: 'x' })]);
     const ui = new RecordingUi();
 
-    await runAgentTurn(
-      deps(llm, repl, ui),
-      new Conversation(),
-      'do it',
-      new AbortController().signal,
-    );
+    await runAgentTurn(deps(llm, repl, ui, 1, waiting('do it')), new Conversation(), signal());
 
-    // Without this the step's line would spin forever: an empty observation
-    // still means the code is done.
+    // Without this the step's line would spin forever: an empty unit still
+    // means the code is done.
     expect(ui.events.filter((event) => event.type === 'exec-done')).toHaveLength(1);
   });
 
   it('records the turn in the session, in the order it happened', async () => {
-    const llm = new ScriptedLlm(['const a = 1;']);
-    const repl = new ScriptedRepl([{ ...noopObservation, value: '1' }]);
+    const llm = new ScriptedLlm(['await step("n", "d", async () => { say("done"); });']);
+    const repl = new ScriptedRepl([
+      did({ kind: 'step', name: 'n', description: 'd' }, { kind: 'say', text: 'done' }),
+    ]);
     const session = new RecordingSession();
 
     await runAgentTurn(
-      { ...deps(llm, repl, new RecordingUi(), 1), session },
+      { ...deps(llm, repl, new RecordingUi(), 1, waiting('what is one?')), session },
       new Conversation(),
-      'what is one?',
-      new AbortController().signal,
+      signal(),
     );
 
     expect(session.events.map((event) => event.type)).toEqual([
       'turn.start',
+      'queue',
       'message',
-      'message',
-      'observation',
-      'message',
-      'note',
+      'step',
+      'say',
       'turn.end',
     ]);
-    expect(session.events[1]).toMatchObject({
-      type: 'message',
-      origin: 'human',
-      message: { role: 'user', text: 'what is one?' },
+    // The queue keeps the entries, not the text that was rendered from them.
+    expect(session.events[1]).toEqual({
+      type: 'queue',
+      entries: [{ origin: 'human', text: 'what is one?' }],
     });
     expect(session.events[2]).toMatchObject({
       type: 'message',
       origin: 'assistant',
-      message: { role: 'assistant', text: 'const a = 1;' },
+      message: { role: 'assistant' },
     });
-    // The observation is what the terminal saw, in structure; the message
-    // beside it is what the model reads.
-    expect(session.events[3]).toMatchObject({ type: 'observation' });
-    expect(session.events[4]).toMatchObject({
-      type: 'message',
-      origin: 'observation',
-      message: { role: 'user' },
-    });
-    // A note is part of the transcript and part of the record.
-    expect(session.events[5]).toMatchObject({ type: 'note' });
-    expect(session.events[6]).toMatchObject({ type: 'turn.end', status: 'limit' });
+    expect(session.events[3]).toEqual({ type: 'step', name: 'n', description: 'd' });
+    expect(session.events[4]).toEqual({ type: 'say', text: 'done' });
+    expect(session.events[5]).toEqual({ type: 'turn.end', status: 'finished' });
   });
 
   it('marks a finished turn as finished, and a cancelled one as cancelled', async () => {
@@ -484,15 +606,16 @@ describe('runAgentTurn', () => {
     await runAgentTurn(
       {
         ...deps(
-          new ScriptedLlm(['finish("done")']),
-          new ScriptedRepl([{ ...noopObservation, finalAnswer: 'done' }]),
+          new ScriptedLlm(['await step("n", "d", async () => { say("done"); });']),
+          new ScriptedRepl([did({ kind: 'say', text: 'done' })]),
           new RecordingUi(),
+          1,
+          waiting('do it'),
         ),
         session: finished,
       },
       new Conversation(),
-      'do it',
-      new AbortController().signal,
+      signal(),
     );
     expect(finished.events.at(-1)).toEqual({ type: 'turn.end', status: 'finished' });
 
@@ -500,9 +623,11 @@ describe('runAgentTurn', () => {
     const controller = new AbortController();
     controller.abort();
     await runAgentTurn(
-      { ...deps(new FailingLlm(), new ScriptedRepl([]), new RecordingUi()), session: cancelled },
+      {
+        ...deps(new FailingLlm(), new ScriptedRepl([]), new RecordingUi(), 1, waiting('do it')),
+        session: cancelled,
+      },
       new Conversation(),
-      'do it',
       controller.signal,
     );
     expect(cancelled.events.at(-1)).toEqual({ type: 'turn.end', status: 'cancelled' });
@@ -515,14 +640,14 @@ describe('runAgentTurn', () => {
     const controller = new AbortController();
     controller.abort();
 
-    const result = await runAgentTurn(
-      deps(llm, repl, ui),
+    const result: AgentTurnResult = await runAgentTurn(
+      deps(llm, repl, ui, 1, waiting('do it')),
       new Conversation(),
-      'do it',
       controller.signal,
     );
 
     expect(result.finished).toBe(false);
+    expect(result.status).toBe('cancelled');
     expect(ui.events).toContainEqual({ type: 'status', text: 'Cancelled.' });
     expect(ui.events).toContainEqual({ type: 'busy', busy: false });
   });
@@ -532,10 +657,9 @@ describe('runAgentTurn', () => {
 
     await expect(
       runAgentTurn(
-        deps(new FailingLlm(), new ScriptedRepl([]), ui),
+        deps(new FailingLlm(), new ScriptedRepl([]), ui, 1, waiting('do it')),
         new Conversation(),
-        'do it',
-        new AbortController().signal,
+        signal(),
       ),
     ).rejects.toThrow();
 

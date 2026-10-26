@@ -362,14 +362,25 @@ together while the task definitions and grading remain fixed.
 
 ```bash
 npm run eval:smoke       # offline reference/runner self-check
-npm run eval:baseline    # live model, three trials per task; creates .evals/baseline
+npm run eval:baseline    # live model, three trials per task; creates .evals/baseline-v3
 npm run eval:regression  # rerun and compare old capabilities with that baseline
+npm run eval:long:smoke  # offline self-check for eight composite/multi-turn tasks
+npm run eval:long        # live long-task exploration, three trials per task
+npm run eval:experiment -- --mode live --trials 3 --concurrency 3  # four prompt/harness arms
+npm run eval:repository:smoke  # offline pinned real-repository checks
+npm run eval:repository       # live feature, bug fix, and compatibility refactor
 ```
 
 The npm scripts load `.env.local`. Reports, traces, and bounded final-state
 snapshots are written under `.evals/`. Offline scores are kept distinct from
 real model results. See [Evaluation workflow](docs/evaluations.md) for task
 authoring, comparison gates, budgets, and joint prompt/harness experiments.
+See [Composite and long evaluations](docs/long-evaluations.md) for the development/
+holdout split, turn checkpoints, external input updates, and longer budgets.
+See [Evaluation-driven iteration](docs/evaluation-iteration.md) for the controlled
+four-arm experiment, model-initiated memory, pinned repository tasks, and promotion rules.
+See [Iteration results](docs/iteration-evaluation-results.md) for the measured outcomes,
+independent confirmation, rubric correction, and current baselines.
 
 ## Security
 

@@ -3,10 +3,11 @@ import { type ChildProcess, execFile } from 'node:child_process';
 /** Kill descendants too: a timed-out shell must not write into a later trial. */
 export async function stopProcess(child: ChildProcess): Promise<void> {
   const pid = child.pid;
-  if (pid === undefined || child.exitCode !== null || child.signalCode !== null) {
+  if (pid === undefined) {
     return;
   }
   if (process.platform === 'win32') {
+    if (child.exitCode !== null || child.signalCode !== null) return;
     await new Promise<void>((resolve) => {
       execFile(
         'taskkill',

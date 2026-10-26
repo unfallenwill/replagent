@@ -11,7 +11,7 @@ permissions:
 jobs:
   check:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -29,11 +29,24 @@ jobs:
       - run: npm run check
       - name: Reference evaluation self-check
         run: npm run eval:smoke -- --out .evals/ci
+      - name: Long task reference self-check
+        run: npm run eval:long:smoke -- --out .evals/ci-long
+      - name: Prompt and harness reference self-check
+        run: npm run eval:experiment -- --mode reference --trials 1 --out .evals/ci-experiment
+      - name: Real repository reference self-check
+        run: npm run eval:repository:smoke -- --out .evals/ci-repository
+      - name: Reject incomplete repository solutions
+        run: node --import tsx eval/repository/calibrate.ts .evals/ci-repository-calibration
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: reference-evals-${{ matrix.os }}-node${{ matrix.node }}
-          path: .evals/ci/
+          path: |
+            .evals/ci/
+            .evals/ci-long/
+            .evals/ci-experiment/
+            .evals/ci-repository/
+            .evals/ci-repository-calibration/
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 14

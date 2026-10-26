@@ -60,7 +60,10 @@ async function execute(message: Extract<ToWorker, { type: 'start' }>, llm: LlmPo
     for (const text of message.turns) {
       send({ type: 'turn.start', turn });
       await subject.send(text, new AbortController().signal);
-      send({ type: 'turn.end', turn });
+      await new Promise<void>((resolve) => {
+        continueTurn = resolve;
+        send({ type: 'turn.end', turn });
+      });
       turn += 1;
     }
   } finally {
@@ -70,7 +73,13 @@ async function execute(message: Extract<ToWorker, { type: 'start' }>, llm: LlmPo
 
 const llm = new RemoteLlm();
 let started = false;
+let continueTurn: (() => void) | undefined;
 process.on('message', (message: ToWorker) => {
+  if (message.type === 'turn.continue') {
+    continueTurn?.();
+    continueTurn = undefined;
+    return;
+  }
   if (message.type !== 'start') {
     llm.accept(message);
     return;

@@ -11,6 +11,7 @@ const FLAGS = {
   help: { type: 'boolean', short: 'h' },
   mode: { type: 'string' },
   suite: { type: 'string' },
+  partition: { type: 'string' },
   task: { type: 'string', multiple: true },
   tasks: { type: 'string' },
   trials: { type: 'string' },
@@ -44,6 +45,7 @@ export interface EvalOptions {
   readonly command: 'run' | 'list' | 'compare' | 'help';
   readonly config: EvalConfig;
   readonly suite: string;
+  readonly partition: string;
   readonly selectors: readonly string[];
   readonly tasksFile: string | undefined;
   readonly baseline: string | undefined;
@@ -62,6 +64,7 @@ export async function parseEvalArgs(argv: readonly string[], root: string): Prom
     command: command as EvalOptions['command'],
     config: await makeConfig(values, root),
     suite,
+    partition: partitionOf(values.partition),
     selectors: values.task ?? [],
     tasksFile: optionalPath(root, values.tasks),
     baseline: optionalPath(root, baseline),
@@ -86,6 +89,13 @@ function suiteOf(value: string | undefined): string {
   if (!['all', 'regression', 'capability'].includes(suite))
     throw new Error(`Unknown suite: ${suite}`);
   return suite;
+}
+
+function partitionOf(value: string | undefined): string {
+  const partition = value ?? 'all';
+  if (!['all', 'development', 'holdout'].includes(partition))
+    throw new Error('Unknown --partition; use all, development, or holdout.');
+  return partition;
 }
 
 function validatePositionals(command: string, args: readonly string[]): void {
@@ -178,6 +188,7 @@ export const EVAL_HELP: string = [
   '--trials N                     Independent attempts per task (default: 3)',
   '--concurrency N                Concurrent trials (default: 2)',
   '--suite all|regression|capability',
+  '--partition all|development|holdout',
   '--task ID-OR-PREFIX             Filter tasks; repeat to select several',
   '--tasks MODULE                 A module exporting TASKS for a custom suite',
   '--candidate MODULE             A module exporting createSubject(context)',

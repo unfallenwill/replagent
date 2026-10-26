@@ -28,18 +28,18 @@ npm run eval:baseline
 npm run eval:regression
 ```
 
-基线保存在 `.evals/baseline/report.json`，不被自动覆盖。已有基线时再次执行
+当前基线保存在 `.evals/baseline-v3/report.json`，不被自动覆盖。已有基线时再次执行
 `eval:baseline` 会拒绝写入。需要主动更换基线时，给新运行使用另一个 `--out`，
 阅读失败轨迹和比较结果，再在后续命令中显式指定该报告。
 
 ```sh
 npm run eval -- list
 npm run eval -- run --task files/ --trials 3 --out .evals/files
-npm run eval -- run --trials 3 --out .evals/candidate --baseline .evals/baseline/report.json
-npm run eval -- compare .evals/baseline/report.json .evals/candidate/report.json
+npm run eval -- run --trials 3 --concurrency 3 --out .evals/candidate --baseline .evals/baseline-v3/report.json
+npm run eval -- compare .evals/baseline-v3/report.json .evals/candidate/report.json
 ```
 
-默认每任务三次、并发二、每次试验总时限 180 秒、最多 24 次模型请求、每回复最多
+通用 CLI 默认每任务三次、并发二；基线与回归预设固定并发三。每次试验总时限 180 秒、最多 24 次模型请求、每回复最多
 8192 个输出 token、每个 agent turn 最多 12 步。全部可通过
 `--trials`、`--concurrency`、`--timeout-ms`、`--max-calls`、
 `--max-tokens`、`--max-steps` 调整。
@@ -67,6 +67,11 @@ GitHub Actions 在 Windows/Linux、Node 22/24 上运行质量检查和 reference
 输入中的伪指令、Unicode/CRLF、跨用户轮次状态及观察循环。它们是小型起始任务集，
 不代表完整的软件工程能力；持续从实际失败中增加任务与输入变体。
 
+另有 [8 个组合与长程任务](long-evaluations.md)，包含 5 个开发任务和 3 个留出任务、
+逐轮状态检查、输入更新和独立预算。使用 `eval:long:smoke` 与 `eval:long` 运行，
+不改变基础任务和原有基线。
+本轮真实结果见 [组合与长程评估记录](long-evaluation-results.md)。
+
 ## 回归判定
 
 默认逐任务、逐检查点比较成功率，任何下降都阻断。只比较总平均分可能掩盖旧能力丢失，
@@ -87,7 +92,7 @@ GitHub Actions 在 Windows/Linux、Node 22/24 上运行质量检查和 reference
 效率阈值默认只报告、不阻断，可显式开启：
 
 ```sh
-npm run eval -- compare .evals/baseline/report.json .evals/candidate/report.json --max-token-ratio 1.20 --max-latency-ratio 1.50
+npm run eval -- compare .evals/baseline-v3/report.json .evals/candidate/report.json --max-token-ratio 1.20 --max-latency-ratio 1.50
 ```
 
 `--max-pass-rate-drop 0.05` 可允许最多 5 个百分点的下降，默认是 0。
@@ -126,7 +131,7 @@ const task: EvalTask = {
 ## 联合替换 prompt 与 harness
 
 ```sh
-npm run eval -- run --candidate eval/candidate.ts --prompt-file experiments/prompt.txt --out .evals/experiment --baseline .evals/baseline/report.json
+npm run eval -- run --candidate eval/candidate.ts --prompt-file experiments/prompt.txt --concurrency 3 --out .evals/experiment --baseline .evals/baseline-v3/report.json
 ```
 
 候选模块导出 `createSubject(context)`，返回：
@@ -178,3 +183,7 @@ REPL 状态复用。worker 通过控制器获得模型结果；流事件在控�
 
 实际 transcript 可能包含代码和任务数据，`.evals/` 与 `.env.local` 默认被 Git 忽略。
 长期基线应由项目维护者选择保存位置和访问范围，框架不会自动提交或提升基线。
+
+四组 prompt/harness 对照、主动上下文检查点及真实仓库题见
+[评估驱动的迭代](evaluation-iteration.md)。候选指纹现在包含本地静态依赖；报告还记录
+评估器指纹，防止工作区准备或计量逻辑改变后继续沿用旧门禁。

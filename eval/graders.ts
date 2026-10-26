@@ -87,7 +87,7 @@ function nodeCheck(check: Extract<EvalCheck, { type: 'node' }>, cwd: string): Pr
       cwd,
       windowsHide: true,
       env: cleanEnvironment(),
-      timeout: 10_000,
+      timeout: check.timeoutMs ?? 10_000,
       killSignal: 'SIGKILL',
     });
     let output = '';

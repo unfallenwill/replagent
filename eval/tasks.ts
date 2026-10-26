@@ -1,3 +1,4 @@
+import { workspacePath } from './files.js';
 import type { EvalCheck, EvalTask } from './types.js';
 
 /** Reference programs validate the fixtures and graders using the real REPL. */
@@ -473,9 +474,42 @@ function validateTask(task: EvalTask): void {
   }
   const checks = new Set(task.checks.map((check) => check.id));
   if (checks.size !== task.checks.length) throw new Error(`Duplicate check ids: ${task.id}`);
+  validateChecks(task);
+  validateInputs(task);
+  if (task.setup !== undefined && !/^[a-f0-9]{64}$/.test(task.setup.lockHash))
+    throw new Error(`Invalid dependency lock hash: ${task.id}`);
+}
+
+function validateChecks(task: EvalTask): void {
   for (const check of task.checks) {
-    if (check.type === 'unchanged' && task.fixtures[check.path] === undefined) {
-      throw new Error(`Unchanged check needs a fixture: ${task.id}/${check.path}`);
+    if (check.afterTurn !== undefined) validateTurn(check.afterTurn, task);
+    if (check.type === 'unchanged') validateUnchanged(check, task);
+    if (check.type === 'node' && check.timeoutMs !== undefined) {
+      if (!Number.isInteger(check.timeoutMs) || check.timeoutMs < 1 || check.timeoutMs > 300_000)
+        throw new Error(`Invalid grader timeout: ${task.id}/${check.id}`);
     }
   }
+}
+
+function validateUnchanged(check: Extract<EvalCheck, { type: 'unchanged' }>, task: EvalTask): void {
+  if (check.sinceTurn !== undefined) {
+    validateTurn(check.sinceTurn, task);
+    if (check.sinceTurn > (check.afterTurn ?? task.turns.length - 1))
+      throw new Error(`Source checkpoint is after the target: ${task.id}/${check.id}`);
+  } else if (task.fixtures[check.path] === undefined) {
+    throw new Error(`Unchanged check needs a fixture: ${task.id}/${check.path}`);
+  }
+}
+
+function validateInputs(task: EvalTask): void {
+  for (const file of Object.keys(task.fixtures)) workspacePath('/eval-workspace', file);
+  for (const update of task.updates ?? []) {
+    validateTurn(update.beforeTurn, task);
+    for (const file of Object.keys(update.files)) workspacePath('/eval-workspace', file);
+  }
+}
+
+function validateTurn(turn: number, task: EvalTask): void {
+  if (!Number.isInteger(turn) || turn < 0 || turn >= task.turns.length)
+    throw new Error(`Invalid user turn ${turn}: ${task.id}`);
 }

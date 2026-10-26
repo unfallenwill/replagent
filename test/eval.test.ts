@@ -122,6 +122,15 @@ describe('evaluation regression gates', () => {
     );
   });
 
+  it('keeps old basic reports compatible while protecting versioned checkpoint graders', () => {
+    const baseline = fixtureReport([trialResult(true)]);
+    const current = { ...baseline, checkpointHash: 'current-checkpoints' };
+    expect(compareReports(baseline, current).passed).toBe(true);
+    expect(
+      compareReports({ ...baseline, checkpointHash: 'old-checkpoints' }, current).issues.join(),
+    ).toContain('Checkpoint implementation changed');
+  });
+
   it('supports explicit noise tolerance and efficiency gates', () => {
     const baseline = fixtureReport([trialResult(true, 1), trialResult(true, 2)]);
     const after = fixtureReport([trialResult(true, 1), trialResult(false, 2)]);

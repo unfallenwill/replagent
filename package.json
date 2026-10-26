@@ -27,8 +27,15 @@
     "coverage": "vitest run --coverage",
     "eval": "node --env-file-if-exists=.env.local --import tsx eval/cli.ts",
     "eval:smoke": "npm run eval -- run --mode reference --trials 1",
-    "eval:baseline": "npm run eval -- run --mode live --trials 3 --out .evals/baseline",
-    "eval:regression": "npm run eval -- run --mode live --trials 3 --baseline .evals/baseline/report.json",
+    "eval:baseline": "npm run eval -- run --mode live --trials 3 --concurrency 3 --out .evals/baseline-v3",
+    "eval:regression": "npm run eval -- run --mode live --trials 3 --concurrency 3 --baseline .evals/baseline-v3/report.json",
+    "eval:long": "npm run eval -- run --tasks eval/long/tasks.ts --timeout-ms 900000 --max-calls 80 --max-steps 32",
+    "eval:long:smoke": "npm run eval:long -- --mode reference --trials 1",
+    "eval:experiment": "node --env-file-if-exists=.env.local --import tsx eval/experiments/cli.ts run --timeout-ms 900000 --max-calls 80 --max-steps 32",
+    "eval:confirm": "node --env-file-if-exists=.env.local --import tsx eval/experiments/confirm-cli.ts run --timeout-ms 900000 --max-calls 80 --max-steps 32 --trials 10",
+    "eval:verify": "node --import tsx eval/verify.ts",
+    "eval:repository": "npm run eval -- run --tasks eval/repository/tasks.ts --timeout-ms 900000 --max-calls 80 --max-steps 32",
+    "eval:repository:smoke": "npm run eval:repository -- --mode reference --trials 1",
     "check": "npm run typecheck && npm run lint && npm run deps && npm run test && npm run coverage && npm run build"
   },
   "dependencies": {

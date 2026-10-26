@@ -1,6 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { candidateHash } from './bundle.js';
 import { hash, sourceHash, taskHash } from './files.js';
 import type { EvalConfig, EvalReport, EvalTask, TaskSummary, TrialResult } from './types.js';
 
@@ -18,13 +19,44 @@ export async function createRunIdentity(config: EvalConfig, root: string): Promi
     budget: config.budget,
     candidate: {
       path: path.relative(root, config.candidate),
-      hash: hash(await readFile(config.candidate, 'utf8')),
+      hash: await candidateHash(config.candidate),
     },
     promptHash: hash(config.systemPrompt),
     sourceHash: await sourceHash(root),
     graderHash: hash(await readFile(new URL('./graders.ts', import.meta.url), 'utf8')),
+    checkpointHash: hash(await readFile(new URL('./checkpoints.ts', import.meta.url), 'utf8')),
+    evaluatorHash: await evaluatorHash(),
     runtime: { node: process.version, platform: process.platform, arch: process.arch },
   };
+}
+
+async function evaluatorHash(): Promise<string> {
+  const files = [
+    'bundle.ts',
+    'checkpoints.ts',
+    'files.ts',
+    'graders.ts',
+    'llm.ts',
+    'metrics.ts',
+    'process.ts',
+    'process-scope.ts',
+    'process-watch.ps1',
+    'protocol.ts',
+    'report.ts',
+    'trial.ts',
+    'types.ts',
+    'worker.ts',
+    'workspace.ts',
+  ];
+  return hash(
+    (
+      await Promise.all(
+        files.map(
+          async (file) => `${file}\n${await readFile(new URL(file, import.meta.url), 'utf8')}`,
+        ),
+      )
+    ).join('\n'),
+  );
 }
 
 export function createReport(
@@ -232,13 +264,23 @@ export function compatibilityIssues(
   const issues: string[] = [];
   if (policy.maxLatencyRatio !== undefined && baseline.concurrency !== current.concurrency)
     issues.push('Concurrency changed; latency gates require matching concurrency.');
-  if (baseline.graderHash !== current.graderHash)
-    issues.push('Grader implementation changed; review and establish a new baseline.');
+  issues.push(...implementationIssues(baseline, current));
   if (baseline.mode !== current.mode) issues.push('Reference and live results cannot be compared.');
   if (!isDeepStrictEqual(baseline.budget, current.budget)) issues.push('Trial budgets changed.');
   if (!policy.allowModelChange && !sameModel(baseline, current))
     issues.push('Model, endpoint, or effort changed; use --allow-model-change explicitly.');
   issues.push(...taskCompatibilityIssues(baseline.tasks, current.tasks));
+  return issues;
+}
+
+function implementationIssues(baseline: EvalReport, current: EvalReport): string[] {
+  const issues: string[] = [];
+  if (baseline.graderHash !== current.graderHash)
+    issues.push('Grader implementation changed; review and establish a new baseline.');
+  if (baseline.checkpointHash !== undefined && baseline.checkpointHash !== current.checkpointHash)
+    issues.push('Checkpoint implementation changed; review and establish a new baseline.');
+  if (baseline.evaluatorHash !== undefined && baseline.evaluatorHash !== current.evaluatorHash)
+    issues.push('Evaluator implementation changed; review and establish a new baseline.');
   return issues;
 }
 

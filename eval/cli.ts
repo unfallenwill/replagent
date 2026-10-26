@@ -52,6 +52,7 @@ async function loadTasks(options: EvalOptions): Promise<readonly EvalTask[]> {
   const tasks = module.TASKS.filter(
     (task) =>
       (options.suite === 'all' || task.suite === options.suite) &&
+      (options.partition === 'all' || task.partition === options.partition) &&
       (options.selectors.length === 0 ||
         options.selectors.some((selector) => task.id.startsWith(selector))),
   );

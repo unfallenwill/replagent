@@ -5,10 +5,15 @@ export type EvalMode = 'live' | 'reference';
 export type EvalSuite = 'regression' | 'capability';
 
 /** Checks describe observable results, never a required sequence of tools. */
-export type EvalCheck =
+export type EvalCheck = (
   | { readonly id: string; readonly type: 'file'; readonly path: string; readonly content: string }
   | { readonly id: string; readonly type: 'json'; readonly path: string; readonly value: unknown }
-  | { readonly id: string; readonly type: 'unchanged'; readonly path: string }
+  | {
+      readonly id: string;
+      readonly type: 'unchanged';
+      readonly path: string;
+      readonly sinceTurn?: number;
+    }
   | { readonly id: string; readonly type: 'absent'; readonly path: string }
   | {
       readonly id: string;
@@ -16,7 +21,16 @@ export type EvalCheck =
       readonly includes: string;
       readonly turn?: number;
     }
-  | { readonly id: string; readonly type: 'node'; readonly code: string };
+  | {
+      readonly id: string;
+      readonly type: 'node';
+      readonly code: string;
+      readonly timeoutMs?: number;
+    }
+) & {
+  /** Zero-based user turn. Omitted checks inspect the final workspace. */
+  readonly afterTurn?: number;
+};
 
 export interface EvalTask {
   readonly id: string;
@@ -28,6 +42,14 @@ export interface EvalTask {
   readonly checks: readonly EvalCheck[];
   /** A known solution for testing the task and graders, not a model score. */
   readonly reference: readonly string[];
+  readonly partition?: 'development' | 'holdout';
+  /** Trusted controller setup. Dependencies are copied, never shared with the subject. */
+  readonly setup?: { readonly type: 'node-project'; readonly lockHash: string };
+  /** Controller-owned input changes, applied before the specified user turn. */
+  readonly updates?: readonly {
+    readonly beforeTurn: number;
+    readonly files: Readonly<Record<string, string>>;
+  }[];
 }
 
 export interface EvalBudget {
@@ -122,6 +144,8 @@ export interface EvalReport {
   readonly promptHash: string;
   readonly sourceHash: string;
   readonly graderHash?: string;
+  readonly checkpointHash?: string;
+  readonly evaluatorHash?: string;
   readonly runtime: { readonly node: string; readonly platform: string; readonly arch: string };
   readonly tasks: readonly TaskSummary[];
   readonly results: readonly TrialResult[];

@@ -11,7 +11,8 @@ export type ToWorker =
       readonly turns: readonly string[];
     }
   | { readonly type: 'llm.result'; readonly id: number; readonly events: readonly LlmStreamEvent[] }
-  | { readonly type: 'llm.error'; readonly id: number; readonly error: string };
+  | { readonly type: 'llm.error'; readonly id: number; readonly error: string }
+  | { readonly type: 'turn.continue'; readonly turn: number };
 
 export type FromWorker =
   | { readonly type: 'llm.request'; readonly id: number; readonly request: LlmRequest }

@@ -31,6 +31,6 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "vitest.config.ts"],
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "eval/**/*.ts", "vitest.config.ts"],
   "exclude": ["dist", "node_modules"]
 }

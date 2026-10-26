@@ -10,7 +10,7 @@ export default [
     ignores: ['dist/**', 'coverage/**', 'node_modules/**'],
   },
   {
-    files: ['src/**/*.ts', 'test/**/*.ts'],
+    files: ['src/**/*.ts', 'test/**/*.ts', 'eval/**/*.ts'],
     languageOptions: {
       parser: tseslint.parser,
       ecmaVersion: 2023,

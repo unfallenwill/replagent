@@ -21,10 +21,14 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check . && eslint .",
     "lint:fix": "biome check --write . && eslint . --fix",
-    "complexity": "eslint src test --max-warnings 0",
+    "complexity": "eslint src test eval --max-warnings 0",
     "deps": "depcruise src --config .dependency-cruiser.cjs",
     "test": "vitest run",
     "coverage": "vitest run --coverage",
+    "eval": "node --env-file-if-exists=.env.local --import tsx eval/cli.ts",
+    "eval:smoke": "npm run eval -- run --mode reference --trials 1",
+    "eval:baseline": "npm run eval -- run --mode live --trials 3 --out .evals/baseline",
+    "eval:regression": "npm run eval -- run --mode live --trials 3 --baseline .evals/baseline/report.json",
     "check": "npm run typecheck && npm run lint && npm run deps && npm run test && npm run coverage && npm run build"
   },
   "dependencies": {

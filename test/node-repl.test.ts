@@ -83,6 +83,25 @@ describe('NodeReplSession', () => {
     ]);
   });
 
+  it('preserves structured observations instead of hiding command errors behind Object', async () => {
+    const { outcome, events } = await run(
+      'await step("inspect", "observe command failure", async () => { deposit({stdout:"",stderr:"command unavailable",code:1}); })',
+    );
+    expect(outcome.ok).toBe(true);
+    const deposit = events.find((event) => event.kind === 'deposit');
+    expect(deposit?.text).toContain('command unavailable');
+    expect(deposit?.text).toMatch(/["']?code["']?\s*:\s*1/);
+    expect(deposit?.text).not.toBe('[object Object]');
+  });
+
+  it('can observe cyclic values without losing the execution to a serialization error', async () => {
+    const { outcome, events } = await run(
+      'await step("inspect", "observe cyclic state", async () => { const value={name:"retained"}; value.self=value; deposit(value); })',
+    );
+    expect(outcome.ok).toBe(true);
+    expect(events.find((event) => event.kind === 'deposit')?.text).toContain('retained');
+  });
+
   it('refuses a step with no name, before the body runs', async () => {
     const { outcome } = await run(
       'await step("", "described", async () => { globalThis.__ran = true; })',

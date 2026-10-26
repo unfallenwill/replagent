@@ -3,6 +3,7 @@ import path from 'node:path';
 import process from 'node:process';
 import repl from 'node:repl';
 import { PassThrough } from 'node:stream';
+import { inspect } from 'node:util';
 import { type Context, runInContext } from 'node:vm';
 import type { ReplEvent, ReplOutcome, ReplPort, ReplStep } from '../../domain/ports/repl.js';
 import { createToolkit } from '../toolkit/index.js';
@@ -135,7 +136,17 @@ function wrapUnit(code: string): string {
  * is a mistake, and a mistake the model cannot see is a mistake it repeats.
  */
 function spoken(text: unknown, helper: 'say' | 'deposit'): string {
-  const value = typeof text === 'string' ? text : String(text);
+  const value =
+    typeof text === 'string'
+      ? text
+      : inspect(text, {
+          colors: false,
+          depth: 6,
+          maxArrayLength: 1000,
+          maxStringLength: MAX_DEPOSIT_CHARS,
+          customInspect: false,
+          getters: false,
+        });
   if (value.trim().length === 0) {
     throw new Error(
       helper === 'say'

@@ -30,6 +30,7 @@ replagent  There are 12 files in this directory.
 - [Terminal experience](#terminal-experience)
 - [Architecture](#architecture)
 - [Development](#development)
+- [Evaluations](#evaluations)
 - [Security](#security)
 - [Further reading](#further-reading)
 
@@ -352,6 +353,23 @@ longer literally JavaScript. This project chooses the pure-text protocol.
 `npm run check` covers strict type checking, formatting and lint rules,
 complexity limits, dependency boundaries, unit and integration tests,
 coverage thresholds, and the production build.
+
+## Evaluations
+
+Repeatable task evaluations check the real agent loop and REPL against final
+files, functional tests, and answers. Prompt and harness candidates can evolve
+together while the task definitions and grading remain fixed.
+
+```bash
+npm run eval:smoke       # offline reference/runner self-check
+npm run eval:baseline    # live model, three trials per task; creates .evals/baseline
+npm run eval:regression  # rerun and compare old capabilities with that baseline
+```
+
+The npm scripts load `.env.local`. Reports, traces, and bounded final-state
+snapshots are written under `.evals/`. Offline scores are kept distinct from
+real model results. See [Evaluation workflow](docs/evaluations.md) for task
+authoring, comparison gates, budgets, and joint prompt/harness experiments.
 
 ## Security
 
